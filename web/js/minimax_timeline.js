@@ -20,6 +20,8 @@ import {
     newBatchSegment,
     NO_VIDEO_UPLOAD_TASKS,
     normalizeAspectRatioLabel,
+    parseMegapixelsInput,
+    clampMegapixels,
     refAudioLabel,
     refImageLabel,
     RESOLUTION_ASPECTS,
@@ -1650,12 +1652,27 @@ class MiniMaxH3DirectorEditor {
             this.outAspect.onchange = () => this.onOutputField("aspectRatio", this.outAspect.value);
         }
         if (this.outMp) {
-            const applyMp = () => this.onOutputField("megapixels", +this.outMp.value);
-            this.outMp.onchange = applyMp;
+            // Do not coerce incomplete drafts ("0", "0.") — that snaps back to 0.4 mid-typing.
+            const applyMp = ({ force = false } = {}) => {
+                const parsed = parseMegapixelsInput(this.outMp.value);
+                if (parsed == null) {
+                    if (!force) return;
+                    const restored = clampMegapixels(
+                        this.timeline.output?.megapixels ?? DEFAULT_MEGAPIXELS,
+                    );
+                    this.outMp.value = String(restored);
+                    this.onOutputField("megapixels", restored);
+                    return;
+                }
+                this.onOutputField("megapixels", parsed);
+            };
+            this.outMp.onchange = () => applyMp({ force: true });
+            this.outMp.onblur = () => applyMp({ force: true });
             this.outMp.oninput = () => {
                 clearTimeout(this._mpInputTimer);
-                this._mpInputTimer = setTimeout(applyMp, 280);
+                this._mpInputTimer = setTimeout(() => applyMp({ force: false }), 280);
             };
+            this.outMp.addEventListener("keydown", (e) => e.stopPropagation());
         }
         this.outLong.onchange = () => this.onOutputField("longEdge", +this.outLong.value);
         this.outW.onchange = () => this.onOutputField("width", +this.outW.value);
@@ -3572,7 +3589,10 @@ class MiniMaxH3DirectorEditor {
         if (this.outW) this.outW.value = String(resolved.width);
         if (this.outH) this.outH.value = String(resolved.height);
         if (this.outAspect) this.outAspect.value = resolved.aspectRatio;
-        if (this.outMp) this.outMp.value = String(resolved.megapixels);
+        // Keep the in-progress typed text while the field is focused.
+        if (this.outMp && document.activeElement !== this.outMp) {
+            this.outMp.value = String(resolved.megapixels);
+        }
         return resolved;
     }
 
@@ -3720,10 +3740,11 @@ class MiniMaxH3DirectorEditor {
                 this.applyResolutionSelector(value, null);
             }
         } else if (key === "megapixels") {
+            const mp = clampMegapixels(value);
             if (!isCustomAspectRatio(this.timeline.output.aspectRatio)) {
-                this.applyResolutionSelector(null, value);
+                this.applyResolutionSelector(null, mp);
             } else {
-                this.timeline.output.megapixels = value;
+                this.timeline.output.megapixels = mp;
             }
         } else if (key === "mode") {
             this.timeline.output.mode = value;

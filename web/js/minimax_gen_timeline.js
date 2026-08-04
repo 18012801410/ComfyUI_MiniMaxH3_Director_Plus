@@ -20,6 +20,33 @@ export const DEFAULT_ASPECT_RATIO = "16:9 (宽屏)";
 export const CUSTOM_ASPECT_RATIO = "自定义";
 /** Official MiniMax template default: 0.4 MP → 864×480 at 16:9 (multiple=32) */
 export const DEFAULT_MEGAPIXELS = 0.4;
+export const MIN_MEGAPIXELS = 0.1;
+export const MAX_MEGAPIXELS = 16;
+
+/** Clamp a finished megapixel value into the allowed range. */
+export function clampMegapixels(value, fallback = DEFAULT_MEGAPIXELS) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(MAX_MEGAPIXELS, Math.max(MIN_MEGAPIXELS, n));
+}
+
+/**
+ * Parse megapixels from a number input while the user may still be typing.
+ * Returns null for incomplete drafts ("" / "0" / "0." / ".") so UI must not coerce to default.
+ */
+export function parseMegapixelsInput(raw) {
+    const s = String(raw ?? "").trim();
+    if (!s || s === "." || s === "-" || s === "-.") return null;
+    // Trailing decimal = still typing ("0.", "1.")
+    if (/^-?\d+\.$/.test(s)) return null;
+    // Bare 0 is the start of "0.x"
+    if (/^-?0$/.test(s)) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    // Below minimum while typing fractions like "0.05" — wait until blur/change to clamp.
+    if (n < MIN_MEGAPIXELS) return null;
+    return Math.min(MAX_MEGAPIXELS, n);
+}
 
 /** Map legacy English labels → current Chinese labels. */
 const ASPECT_RATIO_ALIASES = {
@@ -114,7 +141,7 @@ export function resolutionFromSelector(aspectRatio, megapixels, multiple = MINIM
     const label = normalizeAspectRatioLabel(aspectRatio);
     const row = RESOLUTION_ASPECTS.find(([l]) => l === label) || RESOLUTION_ASPECTS.find(([l]) => l === DEFAULT_ASPECT_RATIO);
     const [, wRatio, hRatio] = row;
-    const mp = Math.min(16, Math.max(0.1, Number(megapixels) || DEFAULT_MEGAPIXELS));
+    const mp = clampMegapixels(megapixels);
     const mult = Math.max(8, parseInt(multiple, 10) || MINIMAX_CANVAS_MULTIPLE);
     const totalPixels = mp * 1024 * 1024;
     const scale = Math.sqrt(totalPixels / (wRatio * hRatio));
