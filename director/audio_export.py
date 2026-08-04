@@ -116,6 +116,84 @@ def _pad_or_trim_audio_to_frames(
     return {"waveform": torch.cat([wave, pad], dim=-1), "sample_rate": sr}
 
 
+def _align_audio_channels(wave: torch.Tensor, channels: int) -> torch.Tensor:
+    """Ensure waveform is [1, C, T] with C == channels (duplicate mono / trim extra)."""
+    if wave.ndim != 3:
+        return wave
+    have = int(wave.shape[1])
+    if have == channels:
+        return wave
+    if have == 1 and channels > 1:
+        return wave.expand(1, channels, -1).contiguous()
+    if have > channels:
+        return wave[:, :channels, :].contiguous()
+    # Pad missing channels with zeros.
+    pad = torch.zeros(1, channels - have, wave.shape[-1], dtype=wave.dtype, device=wave.device)
+    return torch.cat([wave, pad], dim=1)
+
+
+def _segment_frame_counts_for_audio(plan, n_audios: int, total_frames: int) -> list[int]:
+    """Per-segment frame lengths used to stitch generated audio under「全部导出」."""
+    segs = list(getattr(plan, "segments", None) or [])
+    if len(segs) == n_audios:
+        counts = []
+        for seg in segs:
+            fc = int(getattr(seg, "frame_count", 0) or 0)
+            if fc <= 0:
+                fc = max(0, int(getattr(seg, "end_frame", 0) or 0) - int(getattr(seg, "start_frame", 0) or 0))
+            counts.append(max(0, fc))
+        if sum(counts) > 0:
+            return counts
+    # Fallback: split total frames evenly across audio clips.
+    n = max(1, n_audios)
+    base = max(0, int(total_frames)) // n
+    rem = max(0, int(total_frames)) - base * n
+    return [base + (1 if i < rem else 0) for i in range(n)]
+
+
+def _merge_generated_segment_audios(
+    plan,
+    segment_audios: list,
+    *,
+    total_frames: int,
+    fps: float,
+) -> dict[str, Any]:
+    """Concatenate per-segment AV audio into one timeline for merged video export."""
+    sr = SILENT_SAMPLE_RATE
+    for gen in segment_audios:
+        if _audio_has_samples(gen):
+            sr = int(gen.get("sample_rate") or sr) or SILENT_SAMPLE_RATE
+            break
+    counts = _segment_frame_counts_for_audio(plan, len(segment_audios), total_frames)
+    parts: list[torch.Tensor] = []
+    max_ch = 2
+    for i, gen in enumerate(segment_audios):
+        fc = counts[i] if i < len(counts) else 0
+        part = _pad_or_trim_audio_to_frames(
+            gen if _audio_has_samples(gen) else None,
+            frame_count=fc,
+            fps=fps,
+            sample_rate=sr,
+        )
+        wave = part.get("waveform")
+        if isinstance(wave, torch.Tensor) and wave.ndim == 3 and wave.numel() > 0:
+            max_ch = max(max_ch, int(wave.shape[1]))
+            parts.append(wave)
+        else:
+            n = frames_to_audio_samples(fc, fps, sr)
+            parts.append(torch.zeros(1, 2, max(0, n)))
+    if not parts:
+        return empty_audio_dict(sr)
+    parts = [_align_audio_channels(p, max_ch) for p in parts]
+    merged = torch.cat(parts, dim=-1)
+    return _pad_or_trim_audio_to_frames(
+        {"waveform": merged, "sample_rate": sr},
+        frame_count=total_frames,
+        fps=fps,
+        sample_rate=sr,
+    )
+
+
 def build_director_audio_outputs(
     plan,
     images_out: list,
@@ -136,6 +214,22 @@ def build_director_audio_outputs(
 
     # Prefer model audio only in generate mode.
     if mode == AUDIO_MODE_GENERATE and segment_audios:
+        # 「全部导出」合并画面时 images_out 只有 1 条，必须把各组音频按时间轴拼接，
+        # 否则只会用第 1 组音频并静音填充后半段（第二组及之后无声）。
+        if len(images_out) == 1 and len(segment_audios) > 1:
+            n_frames = int(getattr(images_out[0], "shape", [0])[0] or 0)
+            if n_frames <= 0:
+                n_frames = int(output_frame_end or getattr(plan, "total_frames", 0) or 0)
+            merged = _merge_generated_segment_audios(
+                plan, segment_audios, total_frames=n_frames, fps=fps,
+            )
+            if _audio_has_samples(merged):
+                log.info(
+                    "Merged %d segment audio clip(s) for export=all (%d frames).",
+                    len(segment_audios), n_frames,
+                )
+                return [merged]
+
         outputs: list[dict[str, Any]] = []
         for i, tensor in enumerate(images_out):
             gen = segment_audios[i] if i < len(segment_audios) else None
