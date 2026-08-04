@@ -21,9 +21,8 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 | **Reference groups (r2v)** | fl2v-style groups: up to 9 images / 3 audios / 3 videos per group; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
 | **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
 | **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
-| **Segment continuity** | Off by default; when on, last-frame → next first_frame handoff (no Wan SCAIL latent lock) |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
-| **Run report** | `report` output with plan, continuity, per-segment summary |
+| **Run report** | `report` output with plan and per-segment summary |
 
 ### Inputs / outputs
 

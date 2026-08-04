@@ -204,7 +204,7 @@ function makeGroupHeaderWidget(inputName, inputData) {
 }
 
 const STYLES = `
-.bd-host{width:100%;box-sizing:border-box;display:block}
+.mmx-host{width:100%;box-sizing:border-box;display:block}
 .bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px)}
 .bd-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;width:100%}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
@@ -580,7 +580,7 @@ function syncDirectorNodeSize(node, editor) {
 }
 
 function ensureDirectorDomWidgetWidth(node) {
-    const widget = node?._directorDomWidget;
+    const widget = node?._minimaxDomWidget;
     const fullW = node?.size?.[0];
     if (!widget || !fullW) return false;
     if (widget.width === fullW) return false;
@@ -589,7 +589,7 @@ function ensureDirectorDomWidgetWidth(node) {
 }
 
 function moveDirectorDomWidgetToEnd(node) {
-    const widget = node?._directorDomWidget;
+    const widget = node?._minimaxDomWidget;
     if (!widget || !node?.widgets?.length) return;
     const idx = node.widgets.indexOf(widget);
     if (idx === -1 || idx === node.widgets.length - 1) return;
@@ -600,7 +600,7 @@ function moveDirectorDomWidgetToEnd(node) {
 const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images"];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
-    const dom = node?._directorDomWidget;
+    const dom = node?._minimaxDomWidget;
     if (!node?.widgets?.length) return;
 
     const perfWidgets = PERF_WIDGET_ORDER
@@ -638,14 +638,16 @@ function bindDirectorDomWidgetSizing(node, widget, getEditor) {
 }
 
 function initDirectorEditor(node) {
+    // Must not share Bernini's `_directorDomWidget` — their loadedGraphNode mounts on that key.
+    if (!isMiniMaxH3DirectorNode(node)) return null;
     if (node._minimaxEditor) return node._minimaxEditor;
-    const container = node._directorDomWidget?.element;
+    const container = node._minimaxDomWidget?.element;
     if (!container) return null;
     try {
         hookTaskTypeWidget(node);
-        node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._directorDomWidget);
+        node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
-        bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._minimaxEditor);
+        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
         syncDirectorNodeSize(node, node._minimaxEditor);
         return node._minimaxEditor;
     } catch (err) {
@@ -656,8 +658,8 @@ function initDirectorEditor(node) {
 
 function patchDirectorDomWidgetLayout() {
     const canvas = app.canvas;
-    if (!canvas || canvas._berniniDirectorLayoutPatch) return;
-    canvas._berniniDirectorLayoutPatch = true;
+    if (!canvas || canvas._minimaxDirectorLayoutPatch) return;
+    canvas._minimaxDirectorLayoutPatch = true;
     const prev = canvas.onDrawForeground;
     canvas.onDrawForeground = function (ctx) {
         const graph = app.graph ?? canvas.graph;
@@ -7190,14 +7192,14 @@ app.registerExtension({
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
     async loadedGraphNode(node) {
-        if (isMiniMaxH3DirectorNode(node)) normalizeDirectorOutputs(node);
-        if (node._directorDomWidget) {
-            finalizeDirectorWidgetOrder(node);
-            ensureDirectorDomWidgetWidth(node);
-            bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._minimaxEditor);
-            initDirectorEditor(node);
-            node._minimaxEditor?.scheduleRender?.();
-        }
+        if (!isMiniMaxH3DirectorNode(node)) return;
+        normalizeDirectorOutputs(node);
+        if (!node._minimaxDomWidget) return;
+        finalizeDirectorWidgetOrder(node);
+        ensureDirectorDomWidgetWidth(node);
+        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        initDirectorEditor(node);
+        node._minimaxEditor?.scheduleRender?.();
     },
     async getCustomWidgets() {
         return {
@@ -7219,8 +7221,17 @@ app.registerExtension({
             applyDirectorWidgetLabels(this);
             this.size = [1000, 680];
 
+            // Idempotent: avoid a second DOM stack if onNodeCreated is wrapped twice.
+            if (this._minimaxDomWidget?.element) {
+                setTimeout(() => {
+                    finalizeDirectorWidgetOrder(this);
+                    initDirectorEditor(this);
+                }, 0);
+                return r;
+            }
+
             const container = document.createElement("div");
-            container.className = "bd-host";
+            container.className = "mmx-host";
             container.style.minHeight = `${getDirectorUiHeight(null)}px`;
             container.style.setProperty("--comfy-widget-min-height", String(getDirectorUiHeight(null)));
             const self = this;
@@ -7242,7 +7253,7 @@ app.registerExtension({
             bindDirectorDomWidgetSizing(self, widget, () => self._minimaxEditor);
             widget.element = container;
             ensureDirectorDomWidgetWidth(self);
-            self._directorDomWidget = widget;
+            self._minimaxDomWidget = widget;
             finalizeDirectorWidgetOrder(self);
 
             setTimeout(() => {
