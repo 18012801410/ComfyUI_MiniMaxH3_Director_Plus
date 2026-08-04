@@ -61,12 +61,16 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 
 ## 模型与工作流下载
 
-官方权重与说明见：
+完整资源包（**MiniMax H3 模型权重** + **示例 JSON 工作流**）见：
+
+**[Comfyit 搅拌站 · 文章 506：MiniMax H3 模型和工作流](https://comfyit.cn/article/506)**
+
+下载后将 `models/` 合并到 `ComfyUI/models/`，JSON 工作流拖入 ComfyUI 即可。
+
+也可参考：
 
 - **Hugging Face：** [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
 - **ComfyUI 文档：** [MiniMax H3 工作流示例](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3)
-
-下载后按路径放入 `ComfyUI/models/`，JSON 工作流拖入 ComfyUI 即可。
 
 本仓库自带示例：`example_workflows/`
 
@@ -91,7 +95,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 ## 快速开始
 
 1. 确认 ComfyUI ≥ **0.30.0**，已能加载官方 MiniMax H3 节点
-2. 从本仓库 `example_workflows/` 或 [官方模板库](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3) 加载示例
+2. 从 [文章 506](https://comfyit.cn/article/506) 或本仓库 `example_workflows/` 加载示例
 3. 连接 UNET / CLIP / video_vae / audio_vae，在导演台 UI 内编辑时间轴与提示词后 Queue
 
 **视频教程：** [B 站合集 · 插件使用教程](https://space.bilibili.com/1997403556/lists/8357740)
@@ -128,6 +132,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 
 | 栏目 | 链接 |
 |------|------|
+| 模型 / 工作流包 | [comfyit.cn/article/506](https://comfyit.cn/article/506) |
 | 官方 MiniMax H3 文档 | [docs.comfy.org · MiniMax H3](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3) |
 | 插件视频教程 | [B 站合集](https://space.bilibili.com/1997403556/lists/8357740) |
 | 产品中心 | [comfyit.cn/products](https://comfyit.cn/products) |

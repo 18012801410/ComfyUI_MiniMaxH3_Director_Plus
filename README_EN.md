@@ -62,12 +62,16 @@ Restart ComfyUI.
 
 ## Models & workflow downloads
 
-Official weights:
+Full pack (**MiniMax H3 weights** + **example JSON workflows**):
+
+**[Comfyit · article 506 — MiniMax H3 models & workflows](https://comfyit.cn/article/506)**
+
+Merge `models/` into `ComfyUI/models/`, then drag a JSON workflow into ComfyUI.
+
+Also available:
 
 - **Hugging Face:** [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
 - **ComfyUI docs:** [MiniMax H3 workflows](https://docs.comfy.org/tutorials/video/minimax/minimax-h3)
-
-Place files under `ComfyUI/models/`, then drag a JSON workflow into ComfyUI.
 
 This repo ships examples under `example_workflows/`:
 
@@ -92,7 +96,7 @@ This repo ships examples under `example_workflows/`:
 ## Quick start
 
 1. Ensure ComfyUI ≥ **0.30.0** with MiniMax H3 nodes
-2. Load an example from `example_workflows/` or the [official template library](https://docs.comfy.org/tutorials/video/minimax/minimax-h3)
+2. Load an example from [article 506](https://comfyit.cn/article/506) or `example_workflows/`
 3. Connect UNET / CLIP / video_vae / audio_vae, edit the timeline UI, Queue
 
 ### Default sampling
@@ -105,6 +109,7 @@ This repo ships examples under `example_workflows/`:
 
 | Resource | Link |
 |----------|------|
+| Models & workflows pack | [comfyit.cn/article/506](https://comfyit.cn/article/506) |
 | Official MiniMax H3 docs | [docs.comfy.org · MiniMax H3](https://docs.comfy.org/tutorials/video/minimax/minimax-h3) |
 | Product center | [comfyit.cn/products](https://comfyit.cn/products) |
 | Plugins | [comfyit.cn/plugins](https://comfyit.cn/plugins) |
