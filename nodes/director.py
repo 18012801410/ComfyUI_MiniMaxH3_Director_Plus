@@ -70,7 +70,7 @@ class MiniMaxH3Director:
                 **director_timeline_required_inputs(),
             },
             "optional": {
-                "bd_grp_advanced": ("BDGROUP", {"default": "高级采样 Advanced"}),
+                "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
                     {

@@ -32,9 +32,106 @@ import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
+/** r2v picture grid: 9 slots in 3×3; reveal 3 → 6 → 9. */
+const R2V_PICTURE_SLOTS = MAX_REFERENCE_IMAGES;
+const R2V_PICTURE_STEP = 3;
+let _activeR2vMedia = null;
 
 function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
+}
+
+export function formatMediaDuration(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "--:--";
+    const total = Math.max(0, Math.round(sec));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function pauseActiveR2vMedia(except = null) {
+    if (_activeR2vMedia && _activeR2vMedia !== except) {
+        try {
+            _activeR2vMedia.pause();
+        } catch (_) { /* ignore */ }
+        const btn = _activeR2vMedia._r2vPlayBtn;
+        if (btn) btn.textContent = "▶";
+    }
+    if (_activeR2vMedia !== except) _activeR2vMedia = null;
+}
+
+export function bindR2vMediaPlayback(mediaEl, playBtn, progressWrap = null) {
+    mediaEl.classList.add("bd-r2v-media");
+    mediaEl._r2vPlayBtn = playBtn;
+    const fill = progressWrap?.querySelector?.(".bd-r2v-progress-fill");
+    const syncBtn = () => {
+        playBtn.textContent = mediaEl.paused ? "▶" : "⏸";
+    };
+    const syncProgress = () => {
+        if (!progressWrap || !fill) return;
+        const dur = mediaEl.duration;
+        const pct = Number.isFinite(dur) && dur > 0
+            ? Math.min(100, Math.max(0, (mediaEl.currentTime / dur) * 100))
+            : 0;
+        fill.style.width = `${pct}%`;
+        progressWrap.classList.toggle("active", !mediaEl.paused);
+        progressWrap.classList.toggle("playing", !mediaEl.paused);
+    };
+    playBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (mediaEl.paused) {
+            pauseActiveR2vMedia(mediaEl);
+            mediaEl.play().catch(() => {});
+            _activeR2vMedia = mediaEl;
+        } else {
+            mediaEl.pause();
+            if (_activeR2vMedia === mediaEl) _activeR2vMedia = null;
+        }
+        syncBtn();
+        syncProgress();
+    });
+    mediaEl.addEventListener("play", () => {
+        pauseActiveR2vMedia(mediaEl);
+        _activeR2vMedia = mediaEl;
+        syncBtn();
+        syncProgress();
+    });
+    mediaEl.addEventListener("pause", () => {
+        syncBtn();
+        syncProgress();
+    });
+    mediaEl.addEventListener("timeupdate", syncProgress);
+    mediaEl.addEventListener("ended", () => {
+        if (_activeR2vMedia === mediaEl) _activeR2vMedia = null;
+        mediaEl.currentTime = 0;
+        syncBtn();
+        syncProgress();
+        progressWrap?.classList.remove("active", "playing");
+        if (fill) fill.style.width = "0%";
+    });
+    if (progressWrap && fill) {
+        progressWrap.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const dur = mediaEl.duration;
+            if (!Number.isFinite(dur) || dur <= 0) return;
+            const rect = progressWrap.getBoundingClientRect();
+            const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+            mediaEl.currentTime = Math.min(dur, Math.max(0, ratio * dur));
+            syncProgress();
+        });
+    }
+}
+
+export function wireMediaDuration(mediaEl, durEl, onReady) {
+    const apply = () => {
+        if (!Number.isFinite(mediaEl.duration) || mediaEl.duration === Infinity) return;
+        durEl.textContent = formatMediaDuration(mediaEl.duration);
+        onReady?.(mediaEl.duration);
+    };
+    mediaEl.addEventListener("loadedmetadata", apply);
+    if (mediaEl.readyState >= 1) apply();
 }
 
 /**
@@ -113,6 +210,10 @@ function stopPlayer(el) {
 
 function stopAllPlayers(root) {
     root?.querySelectorAll(".bd-batch-vpreview")?.forEach((wrap) => stopPlayer(wrap));
+    pauseActiveR2vMedia(null);
+    root?.querySelectorAll("video.bd-r2v-media, audio.bd-r2v-media")?.forEach((m) => {
+        try { m.pause(); } catch (_) { /* ignore */ }
+    });
 }
 
 export const IMAGE_BATCH_STYLES = `
@@ -127,13 +228,19 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all.hidden{display:none!important}
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
-.bd-batch-card{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:grid;gap:8px;align-items:stretch}
+.bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
 /* i2v / r2i: 源图或参考 | 提示词 | 窄预览 */
 .bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:auto minmax(0,1fr) minmax(132px,168px)}
-/* r2v 2×2: 参考图(2行) | 视频+音频 / 提示词 | 预览 */
-.bd-batch-card.bd-batch-r2v{grid-template-columns:minmax(0,1.15fr) minmax(220px,.85fr);grid-template-rows:auto auto minmax(110px,1fr);gap:8px;align-items:stretch}
+.bd-batch-plain .bd-batch-head,.bd-batch-source .bd-batch-head,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-head{padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:2px}
+.bd-batch-plain .bd-batch-head b,.bd-batch-source .bd-batch-head b,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-head b{color:#f0f0f0;font-size:12px;font-weight:650}
+.bd-batch-plain .bd-batch-prompts,.bd-batch-source .bd-batch-prompts,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px}
+.bd-batch-plain .bd-batch-prompts .bd-label,.bd-batch-source .bd-batch-prompts .bd-label,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.02em}
+.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
+.bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{border-radius:10px;border-color:#262626;background:#0c0c0c}
+/* ——— r2v asset stage (polished) ——— */
+.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column;gap:12px;padding:14px 16px;background:linear-gradient(165deg,#1c1c1c 0%,#141414 52%,#111 100%);border:1px solid #2c2c2c;border-radius:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);align-items:stretch}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
 .bd-batch-card.done{border-color:#3a5080}
 .bd-batch-card.run-skipped{opacity:.42}
@@ -142,70 +249,113 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-card.run-on:not(.run-skipped){border-color:#3a7a55}
 .bd-batch-card.selected.run-on,.bd-batch-card.selected.run-on.done{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.4)}
 .bd-batch-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.bd-batch-r2v .bd-batch-head{padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:2px}
 .bd-batch-head b{color:#ccc;font-size:11px}
+.bd-batch-r2v .bd-batch-head b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .bd-batch-run-check{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f;flex-shrink:0}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .bd-batch-fc{display:flex;align-items:center;gap:4px;color:#888;font-size:10px}
+.bd-batch-r2v .bd-batch-fc{color:#9a9a9a;font-size:11px;gap:6px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:4px 8px}
 .bd-batch-fc input{width:52px;background:#181818;border:1px solid #444;border-radius:4px;color:#eee;padding:3px 5px;font-size:11px}
+.bd-batch-r2v .bd-batch-fc input{width:56px;background:#161616;border-color:#3a3a3a;border-radius:6px;padding:4px 6px}
 .bd-batch-del{background:transparent;border:1px solid #553;color:#f88;border-radius:4px;padding:3px 8px;font-size:10px;cursor:pointer}
+.bd-batch-r2v .bd-batch-del{border-radius:8px;padding:5px 10px;font-size:11px;border-color:#4a3030;color:#f0a0a0}
 .bd-batch-del:hover{background:#3a1515}
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:120px}
-.bd-batch-r2v-imgs{grid-column:1;grid-row:2;min-width:0;display:flex;flex-direction:column;gap:3px;align-self:start}
-.bd-batch-r2v-av{grid-column:2;grid-row:2;min-width:0;display:flex;flex-direction:column;gap:6px;align-self:stretch;justify-content:space-between}
+/* Left = assets (narrower) · Right = prompt + preview (wider) */
+.bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch}
+.bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0}
+.bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
+.bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
+.bd-r2v-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.bd-r2v-section-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#eaeaea}
+.bd-r2v-section-count{font-size:11px;color:#7d7d7d;font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .bd-batch-src{width:88px;height:88px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:9px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-src.has-img{border-style:solid;border-color:#444}
 .bd-batch-src img{width:100%;height:100%;object-fit:contain;background:#000}
 .bd-batch-refs{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;width:108px}
-/* 9 张参考图：5+4 两行，压缩纵向占用 */
-.bd-batch-r2v .bd-batch-refs{grid-template-columns:repeat(5,minmax(0,1fr));width:100%;max-width:none;gap:4px}
+.bd-batch-r2v .bd-batch-refs{grid-template-columns:repeat(3,minmax(0,1fr));width:100%;max-width:none;gap:6px}
+.bd-batch-r2v .bd-batch-ref.bd-r2v-pic-hidden{display:none!important}
+.bd-r2v-pics-toggle{align-self:stretch;margin-top:2px;background:transparent;border:1px dashed #333;border-radius:8px;color:#9a9a9a;font-size:11px;padding:6px 8px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.bd-r2v-pics-toggle:hover{border-color:#555;color:#ddd;background:#121212}
 .bd-batch-ref{position:relative;aspect-ratio:1;border:1px dashed #555;border-radius:3px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;font-size:8px;color:#666}
-.bd-batch-r2v .bd-batch-ref{aspect-ratio:4/3;background:#0a0a0a;min-height:0}
+.bd-batch-r2v .bd-batch-ref{aspect-ratio:1;min-height:0;border-radius:8px;border:1px dashed #333;background:#080808;color:#555;font-size:10px;transition:border-color .15s,background .15s,transform .12s}
+.bd-batch-r2v .bd-batch-ref:hover{border-color:#5a5a5a;background:#101010}
 .bd-batch-ref.has-img{border-style:solid}
+.bd-batch-r2v .bd-batch-ref.has-img{border-color:#3a3a3a;background:#000}
 .bd-batch-ref img{width:100%;height:100%;object-fit:cover}
-/* r2v：完整展示，不裁切 */
 .bd-batch-r2v .bd-batch-ref img{width:100%;height:100%;object-fit:contain;object-position:center;background:#000}
+.bd-batch-r2v .bd-batch-ref .dot{position:absolute;left:6px;top:6px;width:7px;height:7px;border-radius:50%;background:#4fff8f;box-shadow:0 0 0 2px rgba(0,0,0,.5);z-index:2}
+.bd-batch-r2v .bd-batch-ref .cap{position:absolute;left:0;right:0;bottom:0;padding:14px 6px 5px;background:linear-gradient(180deg,transparent,rgba(0,0,0,.78));color:#ddd;font-size:10px;font-weight:600;text-align:center;pointer-events:none;z-index:2}
+.bd-batch-r2v .bd-batch-ref:not(.has-img) .cap{position:static;padding:0;background:none;color:#666;font-weight:500}
 .bd-batch-ref .x{position:absolute;top:0;right:2px;color:#f88;font-size:10px;display:none;line-height:1}
+.bd-batch-r2v .bd-batch-ref .x{top:4px;right:4px;width:20px;height:20px;border-radius:6px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);color:#ff9a9a;font-size:14px;font-weight:700;z-index:3}
 .bd-batch-ref:hover .x{display:block}
+.bd-batch-r2v .bd-batch-ref:hover .x,.bd-batch-r2v .bd-batch-ref:focus-within .x{display:flex}
 .bd-batch-media-block{display:flex;flex-direction:column;gap:4px;min-width:0}
 .bd-batch-media-block .bd-label{color:#888;font-size:10px}
-.bd-batch-r2v-av .bd-batch-media-block{flex:1 1 0;min-height:0}
 .bd-batch-audios,.bd-batch-videos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;width:100%;max-width:420px}
-.bd-batch-r2v .bd-batch-audios,.bd-batch-r2v .bd-batch-videos{max-width:none;gap:4px;flex:1 1 auto}
+.bd-batch-r2v .bd-batch-videos,.bd-batch-r2v .bd-batch-audios{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));max-width:none;gap:7px;width:100%}
 .bd-batch-audio,.bd-batch-video{position:relative;min-height:44px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;padding:6px 4px;box-sizing:border-box;font-size:9px;color:#666;text-align:center;line-height:1.25}
-.bd-batch-r2v .bd-batch-audio,.bd-batch-r2v .bd-batch-video{min-height:0;height:100%;flex:1 1 auto}
+.bd-batch-r2v .bd-batch-audio,.bd-batch-r2v .bd-batch-video{min-height:0;height:auto;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:6px;padding:6px;border-radius:8px;border:1px dashed #333;background:#080808;text-align:left;font-size:11px;color:#777;transition:border-color .15s,background .15s}
+.bd-batch-r2v .bd-batch-audio:hover,.bd-batch-r2v .bd-batch-video:hover{border-color:#555;background:#101010}
 .bd-batch-audio.has-audio,.bd-batch-video.has-video{border-style:solid;border-color:#4a6a4a;color:#cfe;background:#152015}
+.bd-batch-r2v .bd-batch-audio.has-audio,.bd-batch-r2v .bd-batch-video.has-video{border-color:#2f4a38;background:#101812;color:#d8ebe0}
 .bd-batch-audio:hover,.bd-batch-video:hover{border-color:#7a9cff}
+.bd-r2v-thumb{position:relative;width:38px;height:38px;border-radius:7px;background:#1a1a1a;border:1px solid #2e2e2e;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#666;font-size:14px;overflow:hidden}
+.bd-batch-r2v .bd-batch-video .bd-r2v-thumb,.bd-r2v-thumb-video{width:100%;height:auto;aspect-ratio:16/9;border-radius:6px}
+.bd-batch-r2v .bd-batch-audio .bd-r2v-thumb{width:100%;height:44px;border-radius:6px}
+.bd-r2v-thumb-video video{width:100%;height:100%;object-fit:cover;display:block;background:#000;pointer-events:none}
+.bd-r2v-play{position:absolute;inset:0;margin:auto;width:28px;height:28px;border:0;border-radius:50%;background:rgba(0,0,0,.62);color:#fff;font-size:12px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;z-index:2}
+.bd-r2v-play:hover{background:rgba(20,20,20,.82);color:#4fff8f}
+.bd-batch-r2v .has-audio .bd-r2v-thumb,.bd-batch-r2v .has-video .bd-r2v-thumb{border-color:#3a5a45;color:#8fdfb0;background:#152018}
+.bd-r2v-meta{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.bd-batch-r2v .bd-batch-video .bd-r2v-meta,.bd-batch-r2v .bd-batch-audio .bd-r2v-meta{flex-direction:row;align-items:center;justify-content:space-between;gap:4px}
+.bd-r2v-meta .tag{color:#cfcfcf;font-size:11px;font-weight:650}
+.bd-r2v-dur{flex-shrink:0;min-width:2.6em;text-align:right;font-size:11px;color:#8a9;font-variant-numeric:tabular-nums}
+.bd-batch-r2v .bd-batch-audio .name,.bd-batch-r2v .bd-batch-video .name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8aa;font-size:10px;padding:0}
+.bd-batch-r2v .bd-batch-video.has-video .name,.bd-batch-r2v .bd-batch-audio.has-audio .name{display:none}
+.bd-batch-r2v .bd-batch-video:not(.has-video) .name,.bd-batch-r2v .bd-batch-audio:not(.has-audio) .name{display:block;color:#666}
+.bd-batch-r2v .bd-batch-audio audio.bd-r2v-media{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
+.bd-r2v-progress{display:none;width:100%;height:3px;border-radius:99px;background:#222;overflow:hidden;cursor:pointer}
+.bd-r2v-progress.active{display:block}
+.bd-r2v-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#2a6b4a,#4fff8f);border-radius:99px;transition:width .08s linear}
+.bd-r2v-progress.playing .bd-r2v-progress-fill{transition:none}
 .bd-batch-audio .name,.bd-batch-video .name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ad;font-size:9px;padding:0 2px}
 .bd-batch-audio .x,.bd-batch-video .x{position:absolute;top:1px;right:3px;color:#f88;font-size:12px;display:none;line-height:1}
+.bd-batch-r2v .bd-batch-audio .x,.bd-batch-r2v .bd-batch-video .x{position:absolute;top:8px;right:8px;width:20px;height:20px;border-radius:6px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);color:#ff9a9a;font-size:14px;font-weight:700;z-index:3}
 .bd-batch-audio:hover .x,.bd-batch-video:hover .x{display:block}
+.bd-batch-r2v .bd-batch-audio:hover .x,.bd-batch-r2v .bd-batch-video:hover .x{display:flex}
 .bd-batch-prompts{display:flex;flex-direction:column;gap:4px;min-width:0}
 .bd-batch-prompts .bd-label{color:#888;font-size:10px}
+.bd-batch-r2v .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;flex:1 1 auto;min-height:260px;display:flex;flex-direction:column}
+.bd-batch-r2v .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .bd-batch-prompts textarea{width:100%;min-height:88px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;box-sizing:border-box;font-family:inherit;line-height:1.35}
 .bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
-.bd-batch-r2v .bd-batch-prompts{grid-column:1;grid-row:3;min-height:0}
-.bd-batch-r2v .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
+.bd-batch-r2v .bd-batch-prompts textarea{min-height:240px;height:100%;flex:1;resize:vertical;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:168px;min-height:120px;justify-self:end}
-.bd-batch-r2v .bd-batch-preview{grid-column:2;grid-row:3;min-height:120px;height:100%}
+.bd-batch-r2v .bd-batch-preview{min-height:160px;flex:0 0 auto;height:auto;border-radius:10px;border-color:#262626;background:#0c0c0c;padding:8px;font-size:11px;color:#666}
 .bd-batch-preview img{max-width:100%;max-height:140px;object-fit:contain;display:block}
 .bd-batch-plain .bd-batch-preview img,.bd-batch-source .bd-batch-preview img{max-height:120px}
 .bd-batch-r2v .bd-batch-preview img{max-height:100%}
 .bd-batch-vpreview{width:100%;height:100%;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-height:0}
 .bd-batch-vpreview canvas{width:100%;flex:1 1 auto;min-height:72px;max-height:140px;background:#000;border-radius:3px;display:block;object-fit:contain}
+.bd-batch-r2v .bd-batch-vpreview canvas{border-radius:8px;max-height:160px;min-height:96px}
 .bd-batch-plain .bd-batch-vpreview canvas,.bd-batch-source .bd-batch-vpreview canvas{max-height:120px;min-height:64px}
 .bd-batch-vpreview-ctrl{display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0}
 .bd-batch-vpreview-ctrl button{font-size:10px;padding:2px 8px}
 .bd-batch-vpreview-meta{color:#666;font-size:9px;text-align:center;flex-shrink:0}
 @media(max-width:860px){
-.bd-batch-card.bd-batch-r2v{grid-template-columns:1fr;grid-template-rows:auto}
-.bd-batch-r2v-imgs,.bd-batch-r2v-av,.bd-batch-r2v .bd-batch-prompts,.bd-batch-r2v .bd-batch-preview{grid-column:1;grid-row:auto}
-.bd-batch-r2v .bd-batch-preview{min-height:100px}
+.bd-batch-r2v-body,.bd-batch-r2v-foot{grid-template-columns:1fr}
+.bd-batch-r2v .bd-batch-preview{min-height:110px}
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(120px,140px)}
 .bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:auto minmax(0,1fr) minmax(120px,140px)}
 }
 @media(max-width:720px){
 .bd-batch-card,.bd-batch-card.bd-batch-plain,.bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:1fr}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{max-width:none;justify-self:stretch;min-height:80px}
+.bd-batch-r2v .bd-batch-refs{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
 `;
 
@@ -697,7 +847,37 @@ function removeSegVideo(editor, index, slot) {
     editor.commit();
 }
 
-function renderAudioSlot(el, ref, slot, index, editor) {
+function fileBaseName(path) {
+    const s = String(path || "").replace(/\\/g, "/");
+    return s.split("/").pop() || s;
+}
+
+function countFilledRefs(seg) {
+    let imgs = 0;
+    let videos = 0;
+    let audios = 0;
+    for (const r of seg.refs || []) {
+        const idx = Number(r.index ?? r.slot);
+        if (r?.imageFile && Number.isFinite(idx) && idx >= 0 && idx < R2V_PICTURE_SLOTS) imgs += 1;
+    }
+    for (const r of seg.refVideos || []) if (r?.videoFile || r?.fileName) videos += 1;
+    for (const r of seg.refAudios || []) if (r?.audioFile || r?.fileName) audios += 1;
+    return { imgs, videos, audios };
+}
+
+function createR2vSection(title, countText) {
+    const section = document.createElement("div");
+    section.className = "bd-r2v-section";
+    const head = document.createElement("div");
+    head.className = "bd-r2v-section-head";
+    head.innerHTML = `
+        <span class="bd-r2v-section-title">${title}</span>
+        <span class="bd-r2v-section-count">${countText}</span>`;
+    section.appendChild(head);
+    return section;
+}
+
+function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refAudioLabel(slot);
     const file = ref?.audioFile || ref?.fileName || "";
     el.className = `bd-batch-audio${file ? " has-audio" : ""}`;
@@ -705,13 +885,65 @@ function renderAudioSlot(el, ref, slot, index, editor) {
         ? t("ref.audioTitleFilled", { label, file })
         : t("ref.clickUpload", { label });
     el.innerHTML = "";
+    if (r2v) {
+        const thumb = document.createElement("div");
+        thumb.className = "bd-r2v-thumb";
+        const meta = document.createElement("div");
+        meta.className = "bd-r2v-meta";
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = label;
+        meta.appendChild(tag);
+        el.appendChild(thumb);
+        el.appendChild(meta);
+        if (file) {
+            const playBtn = document.createElement("button");
+            playBtn.type = "button";
+            playBtn.className = "bd-r2v-play";
+            playBtn.title = t("batch.r2v.play");
+            playBtn.textContent = "▶";
+            thumb.appendChild(playBtn);
+            const dur = document.createElement("span");
+            dur.className = "bd-r2v-dur";
+            dur.textContent = ref?.durationSec != null
+                ? formatMediaDuration(ref.durationSec)
+                : "--:--";
+            meta.appendChild(dur);
+            const progress = document.createElement("div");
+            progress.className = "bd-r2v-progress";
+            progress.title = t("batch.r2v.seek");
+            progress.innerHTML = `<div class="bd-r2v-progress-fill"></div>`;
+            el.appendChild(progress);
+            const audio = document.createElement("audio");
+            audio.preload = "metadata";
+            audio.src = viewUrl(file);
+            audio.className = "bd-r2v-media";
+            el.appendChild(audio);
+            bindR2vMediaPlayback(audio, playBtn, progress);
+            wireMediaDuration(audio, dur, (sec) => {
+                if (ref) ref.durationSec = sec;
+            });
+            const x = document.createElement("span");
+            x.className = "x";
+            x.textContent = "×";
+            x.onclick = (e) => { e.stopPropagation(); removeSegAudio(editor, index, slot); };
+            el.appendChild(x);
+        } else {
+            thumb.textContent = "♪";
+            const hint = document.createElement("span");
+            hint.className = "name";
+            hint.textContent = t("batch.r2v.uploadHint");
+            meta.appendChild(hint);
+        }
+        return;
+    }
     if (file) {
         const tag = document.createElement("span");
         tag.textContent = label;
         el.appendChild(tag);
         const name = document.createElement("span");
         name.className = "name";
-        name.textContent = file.split("/").pop() || file;
+        name.textContent = fileBaseName(file);
         el.appendChild(name);
         const x = document.createElement("span");
         x.className = "x";
@@ -723,7 +955,7 @@ function renderAudioSlot(el, ref, slot, index, editor) {
     }
 }
 
-function renderVideoSlot(el, ref, slot, index, editor) {
+function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refVideoLabel(slot);
     const file = ref?.videoFile || ref?.fileName || "";
     el.className = `bd-batch-video${file ? " has-video" : ""}`;
@@ -731,13 +963,70 @@ function renderVideoSlot(el, ref, slot, index, editor) {
         ? t("ref.videoTitleFilled", { label, file })
         : t("ref.videoTitleEmpty", { label });
     el.innerHTML = "";
+    if (r2v) {
+        const thumb = document.createElement("div");
+        thumb.className = "bd-r2v-thumb bd-r2v-thumb-video";
+        const meta = document.createElement("div");
+        meta.className = "bd-r2v-meta";
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = label;
+        meta.appendChild(tag);
+        el.appendChild(thumb);
+        el.appendChild(meta);
+        if (file) {
+            const video = document.createElement("video");
+            video.preload = "metadata";
+            video.muted = true;
+            video.playsInline = true;
+            video.src = viewUrl(file);
+            video.className = "bd-r2v-media";
+            thumb.appendChild(video);
+            const playBtn = document.createElement("button");
+            playBtn.type = "button";
+            playBtn.className = "bd-r2v-play";
+            playBtn.title = t("batch.r2v.play");
+            playBtn.textContent = "▶";
+            thumb.appendChild(playBtn);
+            const dur = document.createElement("span");
+            dur.className = "bd-r2v-dur";
+            dur.textContent = ref?.durationSec != null
+                ? formatMediaDuration(ref.durationSec)
+                : "--:--";
+            meta.appendChild(dur);
+            bindR2vMediaPlayback(video, playBtn);
+            playBtn.addEventListener("click", () => {
+                video.muted = false;
+            });
+            wireMediaDuration(video, dur, (sec) => {
+                if (ref) ref.durationSec = sec;
+            });
+            video.addEventListener("loadeddata", () => {
+                if (video.readyState >= 2 && video.currentTime < 0.05) {
+                    try { video.currentTime = Math.min(0.1, (video.duration || 1) * 0.05); } catch (_) { /* ignore */ }
+                }
+            }, { once: true });
+            const x = document.createElement("span");
+            x.className = "x";
+            x.textContent = "×";
+            x.onclick = (e) => { e.stopPropagation(); removeSegVideo(editor, index, slot); };
+            el.appendChild(x);
+        } else {
+            thumb.textContent = "▶";
+            const hint = document.createElement("span");
+            hint.className = "name";
+            hint.textContent = t("batch.r2v.uploadHint");
+            meta.appendChild(hint);
+        }
+        return;
+    }
     if (file) {
         const tag = document.createElement("span");
         tag.textContent = label;
         el.appendChild(tag);
         const name = document.createElement("span");
         name.className = "name";
-        name.textContent = file.split("/").pop() || file;
+        name.textContent = fileBaseName(file);
         el.appendChild(name);
         const x = document.createElement("span");
         x.className = "x";
@@ -749,20 +1038,51 @@ function renderVideoSlot(el, ref, slot, index, editor) {
     }
 }
 
-/** Build r2v top row: left=images, right=videos then audios. */
+/**
+ * r2v layout: left = pictures/videos/audio · right = prompt + preview (returned).
+ * @returns {HTMLElement} main column for prompt/preview
+ */
 function appendR2vMediaSections(card, seg, index, editor) {
-    const imgs = document.createElement("div");
-    imgs.className = "bd-batch-r2v-imgs";
-    const imgBlock = document.createElement("div");
-    imgBlock.className = "bd-batch-media-block";
-    imgBlock.innerHTML = `<span class="bd-label">${t("batch.refImages")}</span>`;
+    const counts = countFilledRefs(seg);
+    const body = document.createElement("div");
+    body.className = "bd-batch-r2v-body";
+
+    const assets = document.createElement("div");
+    assets.className = "bd-batch-r2v-assets";
+
+    const imgSection = createR2vSection(
+        t("batch.r2v.sectionPictures"),
+        `${counts.imgs}/${R2V_PICTURE_SLOTS}`,
+    );
     const refs = document.createElement("div");
     refs.className = "bd-batch-refs";
-    for (let i = 0; i < MAX_REFERENCE_IMAGES; i++) {
+    if (!editor._r2vPicsVisible) editor._r2vPicsVisible = {};
+    const segKey = String(seg.id ?? index);
+    let highestFilled = -1;
+    for (const r of seg.refs || []) {
+        const idx = Number(r.index ?? r.slot);
+        if (r?.imageFile && Number.isFinite(idx)) highestFilled = Math.max(highestFilled, idx);
+    }
+    const minVisible = highestFilled >= 0
+        ? Math.min(R2V_PICTURE_SLOTS, Math.ceil((highestFilled + 1) / R2V_PICTURE_STEP) * R2V_PICTURE_STEP)
+        : R2V_PICTURE_STEP;
+    let visible = Number(editor._r2vPicsVisible[segKey]) || R2V_PICTURE_STEP;
+    visible = Math.max(R2V_PICTURE_STEP, Math.min(R2V_PICTURE_SLOTS, visible));
+    if (visible < minVisible) visible = minVisible;
+    editor._r2vPicsVisible[segKey] = visible;
+
+    const applyPicVisibility = () => {
+        refs.querySelectorAll(".bd-batch-ref").forEach((el, i) => {
+            el.classList.toggle("bd-r2v-pic-hidden", i >= visible);
+        });
+    };
+
+    for (let i = 0; i < R2V_PICTURE_SLOTS; i++) {
         const ref = (seg.refs || []).find((r) => Number(r.index ?? r.slot) === i);
         const slot = document.createElement("div");
         slot.className = "bd-batch-ref";
-        renderRefSlot(slot, ref, i, index, editor);
+        if (i >= visible) slot.classList.add("bd-r2v-pic-hidden");
+        renderR2vRefSlot(slot, ref, i, index, editor);
         slot.onclick = () => {
             if (editor._batchRefDragMoved) {
                 editor._batchRefDragMoved = false;
@@ -773,44 +1093,119 @@ function appendR2vMediaSections(card, seg, index, editor) {
         bindBatchRefDrop(slot, editor, index, i);
         refs.appendChild(slot);
     }
-    imgBlock.appendChild(refs);
-    imgs.appendChild(imgBlock);
-    card.appendChild(imgs);
+    imgSection.appendChild(refs);
 
-    const av = document.createElement("div");
-    av.className = "bd-batch-r2v-av";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "bd-r2v-pics-toggle";
+    const syncToggleLabel = () => {
+        if (visible < R2V_PICTURE_SLOTS) {
+            const next = Math.min(R2V_PICTURE_STEP, R2V_PICTURE_SLOTS - visible);
+            toggle.textContent = t("batch.r2v.expandPics", { n: next });
+        } else {
+            toggle.textContent = t("batch.r2v.collapsePics");
+        }
+    };
+    syncToggleLabel();
+    toggle.onclick = (e) => {
+        e.stopPropagation();
+        if (visible < R2V_PICTURE_SLOTS) {
+            visible = Math.min(R2V_PICTURE_SLOTS, visible + R2V_PICTURE_STEP);
+        } else {
+            visible = Math.max(R2V_PICTURE_STEP, minVisible);
+        }
+        editor._r2vPicsVisible[segKey] = visible;
+        applyPicVisibility();
+        syncToggleLabel();
+        editor.updateDomWidgetHeight?.();
+    };
+    imgSection.appendChild(toggle);
+    assets.appendChild(imgSection);
 
-    const videoBlock = document.createElement("div");
-    videoBlock.className = "bd-batch-media-block";
-    videoBlock.innerHTML = `<span class="bd-label">${t("batch.refVideos")}</span>`;
+    const videoSection = createR2vSection(
+        t("batch.r2v.sectionVideos"),
+        `${counts.videos}/${MAX_REFERENCE_VIDEOS}`,
+    );
     const videos = document.createElement("div");
     videos.className = "bd-batch-videos";
     for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
         const ref = (seg.refVideos || []).find((r) => Number(r.index ?? r.slot) === i);
         const slot = document.createElement("div");
-        renderVideoSlot(slot, ref, i, index, editor);
-        slot.onclick = () => uploadSegVideo(editor, index, i);
+        renderVideoSlot(slot, ref, i, index, editor, { r2v: true });
+        slot.onclick = (e) => {
+            if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+            if (ref && e.target.closest?.(".bd-r2v-thumb")) {
+                slot.querySelector(".bd-r2v-play")?.click();
+                return;
+            }
+            uploadSegVideo(editor, index, i);
+        };
         videos.appendChild(slot);
     }
-    videoBlock.appendChild(videos);
-    av.appendChild(videoBlock);
+    videoSection.appendChild(videos);
+    assets.appendChild(videoSection);
 
-    const audioBlock = document.createElement("div");
-    audioBlock.className = "bd-batch-media-block";
-    audioBlock.innerHTML = `<span class="bd-label">${t("batch.refAudios")}</span>`;
+    const audioSection = createR2vSection(
+        t("batch.r2v.sectionAudios"),
+        `${counts.audios}/${MAX_REFERENCE_AUDIOS}`,
+    );
     const audios = document.createElement("div");
     audios.className = "bd-batch-audios";
     for (let i = 0; i < MAX_REFERENCE_AUDIOS; i++) {
         const ref = (seg.refAudios || []).find((r) => Number(r.index ?? r.slot) === i);
         const slot = document.createElement("div");
-        renderAudioSlot(slot, ref, i, index, editor);
-        slot.onclick = () => uploadSegAudio(editor, index, i);
+        renderAudioSlot(slot, ref, i, index, editor, { r2v: true });
+        slot.onclick = (e) => {
+            if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+            if (ref && e.target.closest?.(".bd-r2v-thumb")) {
+                slot.querySelector(".bd-r2v-play")?.click();
+                return;
+            }
+            uploadSegAudio(editor, index, i);
+        };
         audios.appendChild(slot);
     }
-    audioBlock.appendChild(audios);
-    av.appendChild(audioBlock);
+    audioSection.appendChild(audios);
+    assets.appendChild(audioSection);
 
-    card.appendChild(av);
+    const main = document.createElement("div");
+    main.className = "bd-batch-r2v-main";
+
+    body.appendChild(assets);
+    body.appendChild(main);
+    card.appendChild(body);
+    return main;
+}
+
+function renderR2vRefSlot(el, ref, slot, index, editor) {
+    const label = refImageLabel(slot);
+    const has = !!ref?.imageFile;
+    el.classList.toggle("has-img", has);
+    el.innerHTML = "";
+    el.title = t("ref.clickUploadMove", { label });
+    if (has) {
+        const img = document.createElement("img");
+        img.src = viewUrl(ref.imageFile);
+        img.draggable = false;
+        el.appendChild(img);
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        el.appendChild(dot);
+        const cap = document.createElement("span");
+        cap.className = "cap";
+        cap.textContent = label;
+        el.appendChild(cap);
+        const x = document.createElement("span");
+        x.className = "x";
+        x.textContent = "×";
+        x.onclick = (e) => { e.stopPropagation(); removeSegRef(editor, index, slot); };
+        el.appendChild(x);
+    } else {
+        const cap = document.createElement("span");
+        cap.className = "cap";
+        cap.textContent = label;
+        el.appendChild(cap);
+    }
 }
 
 function renderSourceSlot(el, imageFile) {
@@ -1007,22 +1402,21 @@ export function renderImageBatchGroups(editor) {
         card.className = `bd-batch-card ${layoutClass}`;
         const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
         const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(index);
-        // No default green "selected" chrome (t2v/i2v/r2v). Run participation is
-        // shown only via run-on / run-skipped when「选择运行」is on.
+        // r2v: always show focus selected. t2v/i2v: only run-select participation chrome.
+        if (isR2v && index === editor.selectedIndex) card.classList.add("selected");
         if (index === runningIdx) card.classList.add("running");
         if (runSelectOn && runEnabled) card.classList.add("run-on");
         if (runSelectOn && !runEnabled) card.classList.add("run-skipped");
-        if (isR2v) {
-            card.onclick = (e) => {
-                if (e.target.closest?.("button, input, textarea, select, .bd-batch-ref, .bd-batch-audio, .bd-batch-video, .bd-batch-src, .x")) {
-                    return;
-                }
-                if (editor.selectedIndex === index) return;
-                editor.selectedIndex = index;
-                editor.scheduleRender?.();
-                editor.updateVideoNameLabel?.();
-            };
-        }
+        card.onclick = (e) => {
+            if (e.target.closest?.("button, input, textarea, select, .bd-batch-ref, .bd-batch-audio, .bd-batch-video, .bd-batch-src, .bd-r2v-section, .bd-r2v-play, .x, video, audio")) {
+                return;
+            }
+            if (editor.selectedIndex === index) return;
+            editor.selectedIndex = index;
+            editor._syncR2vCardSelection?.();
+            editor.scheduleRender?.();
+            editor.updateVideoNameLabel?.();
+        };
         const hasPreview = isVideo
             ? (seg.previewFrames?.length > 0 || seg.previewB64)
             : !!seg.previewB64;
@@ -1109,8 +1503,10 @@ export function renderImageBatchGroups(editor) {
             src.onclick = () => uploadSegSource(editor, index);
             media.appendChild(src);
             card.appendChild(media);
-        } else if (variant === "refs" && isR2v) {
-            appendR2vMediaSections(card, seg, index, editor);
+        }
+        let r2vMain = null;
+        if (variant === "refs" && isR2v) {
+            r2vMain = appendR2vMediaSections(card, seg, index, editor);
         } else if (variant === "refs") {
             const media = document.createElement("div");
             media.className = "bd-batch-media";
@@ -1161,8 +1557,13 @@ export function renderImageBatchGroups(editor) {
         preview.className = "bd-batch-preview";
         renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps);
 
-        card.appendChild(prompts);
-        card.appendChild(preview);
+        if (isR2v && r2vMain) {
+            r2vMain.appendChild(prompts);
+            r2vMain.appendChild(preview);
+        } else {
+            card.appendChild(prompts);
+            card.appendChild(preview);
+        }
 
         list.appendChild(card);
     });
@@ -1191,8 +1592,8 @@ export function bindImageBatchEvents(editor) {
 export function getImageBatchUiHeight(editor) {
     const n = Math.max(1, editor?.timeline?.segments?.length || 1);
     const key = resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value);
-    // r2v: 2-row ref grid + side-by-side bottom row.
-    const rowH = key === "r2v" ? 240 : (isVideoBatchTask(key) ? 155 : 130);
+    // r2v: left 3×3 assets + right tall prompt/preview.
+    const rowH = key === "r2v" ? 420 : (isVideoBatchTask(key) ? 155 : 130);
     return 200 + Math.min(n, 4) * rowH + 60;
 }
 

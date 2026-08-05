@@ -1017,9 +1017,7 @@ function renderFl2vShotCards(editor) {
     ui.shotsEl.innerHTML = "";
     shots.forEach((shot, i) => {
         const card = document.createElement("div");
-        // No default green "selected" chrome (same as t2v/i2v). selectedIndex still
-        // drives the prompt detail panel; run participation uses timeline checkboxes.
-        card.className = "bd-fl2v-shot";
+        card.className = "bd-fl2v-shot" + (i === editor.selectedIndex ? " selected" : "");
         card.dataset.shotIndex = String(i);
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
@@ -1033,14 +1031,14 @@ function renderFl2vShotCards(editor) {
             <div class="bd-fl2v-slots">
                 <div class="bd-fl2v-slot-wrap${startUrl ? " has-img" : ""}">
                     <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="${t("tooltip.fl2vStartSlot")}">
-                        <span class="tag start">START</span>
+                        <span class="tag start">${t("fl2v.tag.start")}</span>
                         ${startUrl ? `<img src="${startUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.startRequired")}</span>`}
                     </div>
                     ${startUrl ? `<button type="button" class="x" data-clear="start" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
                 </div>
                 <div class="bd-fl2v-slot-wrap${endUrl ? " has-img" : ""}">
                     <div class="bd-fl2v-slot${endUrl ? " has-img" : ""}" data-slot="end" title="${t("tooltip.fl2vEndSlot")}">
-                        <span class="tag end">END</span>
+                        <span class="tag end">${t("fl2v.tag.end")}</span>
                         ${endUrl ? `<img src="${endUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.endOptional")}</span>`}
                     </div>
                     ${endUrl ? `<button type="button" class="x" data-clear="end" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
@@ -1329,19 +1327,23 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
     }
 
     const badgeY = y0 + 6;
+    const startTag = t("fl2v.tag.start");
+    const endTag = t("fl2v.tag.end");
     ctx.font = "bold 9px sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
+    const startBadgeW = Math.max(38, Math.ceil(ctx.measureText(startTag).width) + 12);
     ctx.fillStyle = "rgba(79,255,143,0.92)";
-    ctx.fillRect(startX + 4, badgeY, 38, 14);
+    ctx.fillRect(startX + 4, badgeY, startBadgeW, 14);
     ctx.fillStyle = "#111";
-    ctx.fillText("START", startX + 8, badgeY + 7);
+    ctx.fillText(startTag, startX + 8, badgeY + 7);
     if (endFile) {
         const endBadgeX = startX + mainW + 4;
+        const endBadgeW = Math.max(30, Math.ceil(ctx.measureText(endTag).width) + 10);
         ctx.fillStyle = "rgba(240,160,48,0.92)";
-        ctx.fillRect(endBadgeX, badgeY, 30, 14);
+        ctx.fillRect(endBadgeX, badgeY, endBadgeW, 14);
         ctx.fillStyle = "#111";
-        ctx.fillText("END", endBadgeX + 5, badgeY + 7);
+        ctx.fillText(endTag, endBadgeX + 5, badgeY + 7);
     }
 
     ctx.restore();
