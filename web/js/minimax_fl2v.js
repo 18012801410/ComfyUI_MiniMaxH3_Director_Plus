@@ -15,6 +15,7 @@ import {
     minFrameCount,
     preferredDurationSecFromFrames,
     resolveTaskKey,
+    roundDurationSec,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 
@@ -134,7 +135,7 @@ export function newFl2vShot(overrides = {}) {
     let durationSec = overrides.durationSec != null && Number.isFinite(Number(overrides.durationSec))
         ? Number(overrides.durationSec)
         : defaultDurationSec("fl2v");
-    durationSec = clamp(Math.round(durationSec * 100) / 100, minDurationSec(), maxDurationSec());
+    durationSec = clamp(roundDurationSec(durationSec), minDurationSec(), maxDurationSec());
     return {
         id: overrides.id || uid(),
         durationSec,
@@ -345,7 +346,7 @@ export function recomputeFl2vTotals(editor) {
     let totalFrames = 0;
     for (const shot of shots) {
         const sec = clamp(Number(shot.durationSec) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec());
-        shot.durationSec = Math.round(sec * 100) / 100;
+        shot.durationSec = roundDurationSec(sec);
         const fc = shotFrameCount(shot, fps);
         totalSec += shot.durationSec;
         totalFrames += fc;
@@ -354,7 +355,7 @@ export function recomputeFl2vTotals(editor) {
         totalSec = defaultDurationSec("fl2v");
         totalFrames = defaultFrameCount("fl2v");
     }
-    totalSec = Math.round(totalSec * 100) / 100;
+    totalSec = roundDurationSec(totalSec);
     totalFrames = Math.max(minFrameCount("fl2v"), totalFrames);
     editor.timeline.durationSec = totalSec;
     editor.timeline.totalFrames = totalFrames;
@@ -420,10 +421,10 @@ export function getFl2vTotalDurationSec(editor) {
     const shots = editor?.timeline?.shots;
     if (Array.isArray(shots) && shots.length) {
         const sum = shots.reduce((a, s) => a + (Number(s.durationSec) || 0), 0);
-        if (sum > 0) return Math.round(sum * 100) / 100;
+        if (sum > 0) return roundDurationSec(sum);
     }
     const stored = Number(editor?.timeline?.durationSec);
-    if (Number.isFinite(stored) && stored > 0) return Math.round(stored * 100) / 100;
+    if (Number.isFinite(stored) && stored > 0) return roundDurationSec(stored);
     return preferredDurationSecFromFrames(getFl2vSampleFrames(editor), fl2vFps(editor));
 }
 
@@ -434,7 +435,7 @@ export function setFl2vTotalFrames(editor, value, { durationSec } = {}) {
         parseInt(value, 10) || DEFAULT_TOTAL,
     );
     if (durationSec != null && Number.isFinite(Number(durationSec))) {
-        editor.timeline.durationSec = Math.round(Number(durationSec) * 100) / 100;
+        editor.timeline.durationSec = roundDurationSec(durationSec);
     }
     if (editor.totalFramesWidget) editor.totalFramesWidget.value = editor.timeline.totalFrames;
     syncFl2vFromShots(editor);
@@ -445,17 +446,25 @@ export function setFl2vTotalFrames(editor, value, { durationSec } = {}) {
 export function setFl2vTotalDurationSec(editor, seconds) {
     const shots = editor.timeline.shots || [];
     if (!shots.length) {
-        editor.timeline.durationSec = clamp(Number(seconds) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec());
+        editor.timeline.durationSec = clamp(
+            roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
+            minDurationSec(),
+            maxDurationSec(),
+        );
         syncFl2vFromShots(editor);
         return editor.timeline.totalFrames;
     }
     // Proportionally scale all shots to match requested total.
-    const target = clamp(Number(seconds) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec());
+    const target = clamp(
+        roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
+        minDurationSec(),
+        maxDurationSec(),
+    );
     const cur = getFl2vTotalDurationSec(editor) || 1;
     const scale = target / cur;
     for (const shot of shots) {
         shot.durationSec = clamp(
-            Math.round((Number(shot.durationSec) || defaultDurationSec("fl2v")) * scale * 100) / 100,
+            roundDurationSec((Number(shot.durationSec) || defaultDurationSec("fl2v")) * scale),
             minDurationSec(),
             maxDurationSec(),
         );
@@ -519,7 +528,7 @@ export function fl2vShotDurationSec(editor, segIndex) {
     const shot = editor.timeline.shots?.[segIndex];
     if (!shot) return 0;
     const stored = Number(shot.durationSec);
-    if (Number.isFinite(stored) && stored > 0) return Math.round(stored * 100) / 100;
+    if (Number.isFinite(stored) && stored > 0) return roundDurationSec(stored);
     return defaultDurationSec("fl2v");
 }
 
@@ -528,7 +537,7 @@ export function setFl2vShotDurationSec(editor, shotIndex, seconds) {
     const shot = shots[shotIndex];
     if (!shot) return;
     shot.durationSec = clamp(
-        Math.round((Number(seconds) || defaultDurationSec("fl2v")) * 100) / 100,
+        roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
         minDurationSec(),
         maxDurationSec(),
     );
@@ -554,18 +563,17 @@ export function rippleFl2vRightEdge(segments, index, newEndFrame, minLen, editor
             const newLen = Math.max(minLen, Math.round(newEndFrame) - (parseInt(seg.start, 10) || 0));
             // Prefer nice seconds that map near this frame count.
             const roughSec = newLen / fps;
-            let best = Math.round(roughSec * 100) / 100;
+            let best = roundDurationSec(roughSec);
             for (const cand of [
                 Math.round(roughSec),
-                Math.round(roughSec * 10) / 10,
-                Math.round(roughSec * 100) / 100,
+                roundDurationSec(roughSec),
             ]) {
                 if (cand < minDurationSec() || cand > maxDurationSec()) continue;
                 if (Math.abs(durationToMiniMaxFrames(cand, fps) - newLen) <= Math.abs(durationToMiniMaxFrames(best, fps) - newLen)) {
                     best = cand;
                 }
             }
-            shot.durationSec = clamp(best, minDurationSec(), maxDurationSec());
+            shot.durationSec = clamp(roundDurationSec(best), minDurationSec(), maxDurationSec());
             // Preview: temporarily layout segments without full sync (drag path).
             const fps2 = fps;
             let cursor = 0;
@@ -778,7 +786,7 @@ function bindFl2vShotCardDnD(editor, cardEl, shotIndex) {
     const handle = cardEl.querySelector(".bd-fl2v-shot-head");
     if (handle) {
         handle.draggable = true;
-        handle.title = "拖动此处互换镜头位置";
+        handle.title = t("tooltip.fl2vDragHandle");
         handle.style.cursor = "grab";
         handle.addEventListener("dragstart", (e) => {
             editor._fl2vShotDrag = true;
@@ -994,7 +1002,7 @@ function bindFl2vSlotDnD(editor, slotEl, shotIndex, slotKind) {
                     editor.scheduleRender?.();
                 } catch (err) {
                     console.error("[MiniMax H3 fl2v] drop upload failed", err);
-                    alert(`上传失败：${err?.message || err}`);
+                    alert(t("upload.alertFailed", { err: err?.message || err }));
                 }
             })();
         }
@@ -1006,11 +1014,12 @@ function renderFl2vShotCards(editor) {
     if (!ui?.shotsEl) return;
     applyFl2vSlotAspect(editor);
     const shots = editor.timeline.shots || [];
-    const sel = editor.selectedIndex;
     ui.shotsEl.innerHTML = "";
     shots.forEach((shot, i) => {
         const card = document.createElement("div");
-        card.className = `bd-fl2v-shot${i === sel ? " selected" : ""}`;
+        // No default green "selected" chrome (same as t2v/i2v). selectedIndex still
+        // drives the prompt detail panel; run participation uses timeline checkboxes.
+        card.className = "bd-fl2v-shot";
         card.dataset.shotIndex = String(i);
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
@@ -1108,7 +1117,7 @@ export function updateFl2vDetailUI(editor) {
     if (ui.totalInput && ui.totalInput !== document.activeElement) {
         ui.totalInput.value = String(getFl2vTotalDurationSec(editor));
         ui.totalInput.disabled = true;
-        ui.totalInput.title = "总时长 = 各组之和（只读，请改各镜时长）";
+        ui.totalInput.title = t("tooltip.fl2vTotalInput");
     }
     renderFl2vShotCards(editor);
     updateFl2vToolbarBtns(editor);
@@ -1222,7 +1231,7 @@ export function bindFl2vEvents(editor) {
             editor.updateDomWidgetHeight?.();
         } catch (err) {
             console.error("[MiniMax H3 fl2v] upload failed", err);
-            alert(`上传失败：${err?.message || err}`);
+            alert(t("upload.alertFailed", { err: err?.message || err }));
         } finally {
             ui.fileInput.value = "";
         }

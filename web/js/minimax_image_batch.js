@@ -6,6 +6,7 @@ import {
     DEFAULT_MEGAPIXELS,
     defaultDurationSec,
     defaultFrameCount,
+    durationToClampedMiniMaxFrames,
     durationToMiniMaxFrames,
     framesToDurationSec,
     imageBatchVariant,
@@ -24,6 +25,8 @@ import {
     refImageLabel,
     refVideoLabel,
     resolveTaskKey,
+    roundDurationSec,
+    sumFrameCounts,
 } from "./minimax_gen_timeline.js";
 import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
@@ -34,19 +37,62 @@ function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
 }
 
-/** User-facing seconds: keep free-form durationSec; only derive from frames for legacy rows. */
+/**
+ * User-facing seconds (1 decimal). durationSec is the source of truth when set;
+ * only fall back to frames for legacy rows that never stored durationSec.
+ */
 function resolveSegmentDurationSec(seg, defFc) {
-    const fc = parseInt(seg._videoFrameCount ?? seg.frameCount ?? seg.length ?? defFc, 10) || defFc;
     if (seg.durationSec != null && Number.isFinite(Number(seg.durationSec))) {
-        const sec = Number(seg.durationSec);
-        // Heal values that were frames/fps round-trips (124f → 5.17) back to a nice input (5).
-        const rawInverse = framesToDurationSec(fc, 24);
-        if (Math.abs(sec - rawInverse) < 0.001) {
-            return preferredDurationSecFromFrames(fc, 24);
-        }
-        return Math.round(sec * 100) / 100;
+        const { durationSec } = durationToClampedMiniMaxFrames(seg.durationSec, 24);
+        return durationSec;
     }
+    const fc = parseInt(seg.frameCount ?? seg.length ?? seg._videoFrameCount ?? defFc, 10) || defFc;
     return preferredDurationSecFromFrames(fc, 24);
+}
+
+/** Apply seconds to a segment by index (avoids stale closures after normalize). */
+function applyBatchSegmentDuration(editor, index, rawSec) {
+    const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
+    const seg = editor.timeline.segments?.[index];
+    if (!seg || !isVideoBatchTask(taskKey)) return null;
+    const clamped = clamp(
+        Number(rawSec) || defaultDurationSec(taskKey),
+        minDurationSec(),
+        maxDurationSec(),
+    );
+    const { frames, durationSec } = durationToClampedMiniMaxFrames(clamped, 24);
+    seg.durationSec = durationSec;
+    seg.frameCount = frames;
+    seg.length = frames;
+    seg._videoFrameCount = frames;
+    // Stale drag preview must not override batch totals.
+    if (editor._previewSegments) editor._previewSegments = null;
+    normalizeImageBatchSegments(editor);
+    return editor.timeline.segments[index] || null;
+}
+
+/** Flush visible 秒数 inputs into segments before a full card re-render. */
+function flushBatchDurationInputs(editor) {
+    const list = editor?.batchList;
+    if (!list) return;
+    const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
+    if (!isVideoBatchTask(taskKey)) return;
+    for (const input of list.querySelectorAll("input[data-batch-sec-index]")) {
+        const index = parseInt(input.getAttribute("data-batch-sec-index"), 10);
+        if (!Number.isFinite(index)) continue;
+        clearTimeout(input._t);
+        input._t = null;
+        const displayed = parseFloat(input.value);
+        if (!Number.isFinite(displayed)) continue;
+        const seg = editor.timeline.segments?.[index];
+        const current = Number(seg?.durationSec);
+        // Skip if already in sync (avoid churn while typing the same committed value).
+        if (seg && Number.isFinite(current) && roundDurationSec(displayed) === roundDurationSec(current)
+            && input !== document.activeElement) {
+            continue;
+        }
+        applyBatchSegmentDuration(editor, index, displayed);
+    }
 }
 
 function formatPreviewFps(value) {
@@ -81,7 +127,11 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all.hidden{display:none!important}
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
-.bd-batch-card{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,30%);gap:8px;align-items:stretch}
+.bd-batch-card{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:grid;gap:8px;align-items:stretch}
+/* t2v: 提示词为主，预览收成右侧窄栏 */
+.bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
+/* i2v / r2i: 源图或参考 | 提示词 | 窄预览 */
+.bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:auto minmax(0,1fr) minmax(132px,168px)}
 /* r2v 2×2: 参考图(2行) | 视频+音频 / 提示词 | 预览 */
 .bd-batch-card.bd-batch-r2v{grid-template-columns:minmax(0,1.15fr) minmax(220px,.85fr);grid-template-rows:auto auto minmax(110px,1fr);gap:8px;align-items:stretch}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
@@ -131,25 +181,31 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-prompts{display:flex;flex-direction:column;gap:4px;min-width:0}
 .bd-batch-prompts .bd-label{color:#888;font-size:10px}
 .bd-batch-prompts textarea{width:100%;min-height:88px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;box-sizing:border-box;font-family:inherit;line-height:1.35}
+.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
 .bd-batch-r2v .bd-batch-prompts{grid-column:1;grid-row:3;min-height:0}
 .bd-batch-r2v .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
+.bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:168px;min-height:120px;justify-self:end}
 .bd-batch-r2v .bd-batch-preview{grid-column:2;grid-row:3;min-height:120px;height:100%}
-.bd-batch-preview img{max-width:100%;max-height:160px;object-fit:contain;display:block}
+.bd-batch-preview img{max-width:100%;max-height:140px;object-fit:contain;display:block}
+.bd-batch-plain .bd-batch-preview img,.bd-batch-source .bd-batch-preview img{max-height:120px}
 .bd-batch-r2v .bd-batch-preview img{max-height:100%}
 .bd-batch-vpreview{width:100%;height:100%;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-height:0}
-.bd-batch-vpreview canvas{width:100%;flex:1 1 auto;min-height:80px;max-height:100%;background:#000;border-radius:3px;display:block}
-.bd-batch-vpreview-ctrl{display:flex;align-items:center;justify-content:center;gap:6px}
+.bd-batch-vpreview canvas{width:100%;flex:1 1 auto;min-height:72px;max-height:140px;background:#000;border-radius:3px;display:block;object-fit:contain}
+.bd-batch-plain .bd-batch-vpreview canvas,.bd-batch-source .bd-batch-vpreview canvas{max-height:120px;min-height:64px}
+.bd-batch-vpreview-ctrl{display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0}
 .bd-batch-vpreview-ctrl button{font-size:10px;padding:2px 8px}
-.bd-batch-vpreview-meta{color:#666;font-size:9px;text-align:center}
+.bd-batch-vpreview-meta{color:#666;font-size:9px;text-align:center;flex-shrink:0}
 @media(max-width:860px){
 .bd-batch-card.bd-batch-r2v{grid-template-columns:1fr;grid-template-rows:auto}
 .bd-batch-r2v-imgs,.bd-batch-r2v-av,.bd-batch-r2v .bd-batch-prompts,.bd-batch-r2v .bd-batch-preview{grid-column:1;grid-row:auto}
 .bd-batch-r2v .bd-batch-preview{min-height:100px}
+.bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(120px,140px)}
+.bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:auto minmax(0,1fr) minmax(120px,140px)}
 }
 @media(max-width:720px){
-.bd-batch-card{grid-template-columns:1fr}
-.bd-batch-preview{min-height:80px}
+.bd-batch-card,.bd-batch-card.bd-batch-plain,.bd-batch-card.bd-batch-source,.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){grid-template-columns:1fr}
+.bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{max-width:none;justify-self:stretch;min-height:80px}
 }
 `;
 
@@ -179,11 +235,11 @@ async function uploadChunked(file) {
         body.append("filename", file.name);
         body.append("chunk", file.slice(start, end), `${file.name}.part`);
         const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
-        if (!resp.ok) throw new Error(await resp.text() || `分块上传失败 (${resp.status})`);
+        if (!resp.ok) throw new Error(await resp.text() || t("upload.chunkFailed", { status: resp.status }));
         const data = await resp.json();
         if (data.name) return data;
     }
-    throw new Error("分块上传未完成");
+    throw new Error(t("upload.chunkIncomplete"));
 }
 
 async function uploadMedia(file) {
@@ -314,12 +370,14 @@ export function ensureImageBatchTimeline(editor) {
     migrateGlobalRefsIntoBatchSegments(editor, taskKey);
     for (const seg of editor.timeline.segments) {
         if (isVideoBatchTask(taskKey)) {
-            const sec = resolveSegmentDurationSec(seg, defFc);
-            const fc = durationToMiniMaxFrames(sec, 24);
-            seg.durationSec = sec;
-            seg.frameCount = fc;
-            seg.length = fc;
-            seg._videoFrameCount = fc;
+            const { frames, durationSec } = durationToClampedMiniMaxFrames(
+                resolveSegmentDurationSec(seg, defFc),
+                24,
+            );
+            seg.durationSec = durationSec;
+            seg.frameCount = frames;
+            seg.length = frames;
+            seg._videoFrameCount = frames;
         } else {
             const prevFc = parseInt(seg.frameCount ?? seg.length, 10) || 0;
             if (prevFc > 1) seg._videoFrameCount = prevFc;
@@ -352,10 +410,12 @@ export function normalizeImageBatchSegments(editor) {
         let fc = 1;
         let durationSec;
         if (isVideo) {
-            const sec = resolveSegmentDurationSec(seg, defFc);
-            const clampedSec = clamp(sec || defSec, minDurationSec(), maxDurationSec());
-            fc = durationToMiniMaxFrames(clampedSec, 24);
-            durationSec = clampedSec;
+            const resolved = durationToClampedMiniMaxFrames(
+                clamp(resolveSegmentDurationSec(seg, defFc) || defSec, minDurationSec(), maxDurationSec()),
+                24,
+            );
+            fc = resolved.frames;
+            durationSec = resolved.durationSec;
         }
         fixed.push({
             ...seg,
@@ -368,7 +428,7 @@ export function normalizeImageBatchSegments(editor) {
             refs: seg.refs || [],
             refAudios: seg.refAudios || [],
             refVideos: seg.refVideos || [],
-            _videoFrameCount: seg._videoFrameCount,
+            _videoFrameCount: isVideo ? fc : seg._videoFrameCount,
             previewB64: seg.previewB64 || "",
             previewFrames: seg.previewFrames || [],
             previewFps: seg.previewFps || parseFloat(editor.frameRateWidget?.value || 24),
@@ -410,31 +470,59 @@ export function deleteImageBatchGroup(editor, index) {
 }
 
 function pickFile(accept, onFile) {
+    // Keep input in DOM until change/cancel — otherwise some Chromium builds
+    // drop the dialog result when the element is GC'd.
     const input = document.createElement("input");
     input.type = "file";
     input.accept = accept;
+    input.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+    const cleanup = () => {
+        input.remove();
+    };
     input.onchange = () => {
         const file = input.files?.[0];
+        cleanup();
         if (file) onFile(file);
     };
+    input.addEventListener("cancel", cleanup);
+    document.body.appendChild(input);
     input.click();
 }
 
 async function uploadSegSource(editor, index) {
-    pickFile("image/*", async (file) => {
+    const segId = editor.timeline.segments[index]?.id;
+    pickFile("image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif", async (file) => {
         try {
+            if (!file?.type?.startsWith("image/") && !/\.(jpe?g|png|webp|bmp|gif)$/i.test(file.name || "")) {
+                throw new Error("Not an image file");
+            }
             const uploaded = await uploadImage(file);
-            const seg = editor.timeline.segments[index];
-            if (!seg) return;
             const imageFile = relPath(uploaded);
-            const dims = await readImageDimensions(file);
-            seg.genImage = { imageFile, width: dims.width, height: dims.height };
+            if (!imageFile) throw new Error("Upload returned empty filename");
+            // Resolve by id — normalize may replace segment object references.
+            const seg = (editor.timeline.segments || []).find((s) => s.id === segId)
+                || editor.timeline.segments[index];
+            if (!seg) return;
+            // Write genImage immediately so UI updates even if dimension probe fails/hangs.
+            seg.genImage = { imageFile, width: 0, height: 0 };
             seg.imageFile = imageFile;
             editor.renderImageBatchGroups();
             editor.updateOutputPreview?.();
-            editor.commit();
+            editor.commit(false, { syncTimeline: true });
+            try {
+                const dims = await readImageDimensions(file);
+                const live = (editor.timeline.segments || []).find((s) => s.id === seg.id) || seg;
+                if (live.genImage?.imageFile === imageFile) {
+                    live.genImage = { imageFile, width: dims.width, height: dims.height };
+                    editor.updateOutputPreview?.();
+                    editor.scheduleTimelineSync?.();
+                }
+            } catch (dimErr) {
+                console.warn("[MiniMax H3Director] batch source dims skipped:", dimErr);
+            }
         } catch (err) {
             console.error("[MiniMax H3Director] batch source upload failed:", err);
+            alert(t("upload.alertFailed", { err: err?.message || err }));
         }
     });
 }
@@ -443,14 +531,14 @@ function readImageDimensions(file) {
     return new Promise((resolve, reject) => {
         const url = URL.createObjectURL(file);
         const img = new Image();
-        img.onload = () => {
+        const done = (fn, arg) => {
+            clearTimeout(timer);
             URL.revokeObjectURL(url);
-            resolve({ width: img.naturalWidth, height: img.naturalHeight });
+            fn(arg);
         };
-        img.onerror = () => {
-            URL.revokeObjectURL(url);
-            reject(new Error("Failed to read image dimensions"));
-        };
+        const timer = setTimeout(() => done(reject, new Error("Image dimension timeout")), 8000);
+        img.onload = () => done(resolve, { width: img.naturalWidth, height: img.naturalHeight });
+        img.onerror = () => done(reject, new Error("Failed to read image dimensions"));
         img.src = url;
     });
 }
@@ -564,7 +652,7 @@ async function uploadSegAudio(editor, index, slot) {
             editor.commit();
         } catch (err) {
             console.error("[MiniMax H3Director] batch audio upload failed:", err);
-            alert(`参考音频上传失败：${err?.message || err}`);
+            alert(t("upload.refAudioFailed", { err: err?.message || err }));
         }
     });
 }
@@ -596,7 +684,7 @@ async function uploadSegVideo(editor, index, slot) {
             editor.commit();
         } catch (err) {
             console.error("[MiniMax H3Director] batch video upload failed:", err);
-            alert(`参考视频上传失败：${err?.message || err}`);
+            alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
         }
     });
 }
@@ -613,7 +701,9 @@ function renderAudioSlot(el, ref, slot, index, editor) {
     const label = refAudioLabel(slot);
     const file = ref?.audioFile || ref?.fileName || "";
     el.className = `bd-batch-audio${file ? " has-audio" : ""}`;
-    el.title = file ? `${label}: ${file}` : `${label} — 点击上传`;
+    el.title = file
+        ? t("ref.audioTitleFilled", { label, file })
+        : t("ref.clickUpload", { label });
     el.innerHTML = "";
     if (file) {
         const tag = document.createElement("span");
@@ -629,7 +719,7 @@ function renderAudioSlot(el, ref, slot, index, editor) {
         x.onclick = (e) => { e.stopPropagation(); removeSegAudio(editor, index, slot); };
         el.appendChild(x);
     } else {
-        el.textContent = `${label}\n上传`;
+        el.textContent = t("ref.audioUpload", { label });
     }
 }
 
@@ -637,7 +727,9 @@ function renderVideoSlot(el, ref, slot, index, editor) {
     const label = refVideoLabel(slot);
     const file = ref?.videoFile || ref?.fileName || "";
     el.className = `bd-batch-video${file ? " has-video" : ""}`;
-    el.title = file ? `${label}: ${file}` : `${label} — 点击上传参考视频`;
+    el.title = file
+        ? t("ref.videoTitleFilled", { label, file })
+        : t("ref.videoTitleEmpty", { label });
     el.innerHTML = "";
     if (file) {
         const tag = document.createElement("span");
@@ -653,7 +745,7 @@ function renderVideoSlot(el, ref, slot, index, editor) {
         x.onclick = (e) => { e.stopPropagation(); removeSegVideo(editor, index, slot); };
         el.appendChild(x);
     } else {
-        el.textContent = `${label}\n上传`;
+        el.textContent = t("ref.videoUpload", { label });
     }
 }
 
@@ -663,7 +755,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
     imgs.className = "bd-batch-r2v-imgs";
     const imgBlock = document.createElement("div");
     imgBlock.className = "bd-batch-media-block";
-    imgBlock.innerHTML = `<span class="bd-label">参考图 (图片1–9)</span>`;
+    imgBlock.innerHTML = `<span class="bd-label">${t("batch.refImages")}</span>`;
     const refs = document.createElement("div");
     refs.className = "bd-batch-refs";
     for (let i = 0; i < MAX_REFERENCE_IMAGES; i++) {
@@ -690,7 +782,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
 
     const videoBlock = document.createElement("div");
     videoBlock.className = "bd-batch-media-block";
-    videoBlock.innerHTML = `<span class="bd-label">参考视频 (视频1–3)</span>`;
+    videoBlock.innerHTML = `<span class="bd-label">${t("batch.refVideos")}</span>`;
     const videos = document.createElement("div");
     videos.className = "bd-batch-videos";
     for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
@@ -705,7 +797,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
 
     const audioBlock = document.createElement("div");
     audioBlock.className = "bd-batch-media-block";
-    audioBlock.innerHTML = `<span class="bd-label">参考音频 (音频1–3)</span>`;
+    audioBlock.innerHTML = `<span class="bd-label">${t("batch.refAudios")}</span>`;
     const audios = document.createElement("div");
     audios.className = "bd-batch-audios";
     for (let i = 0; i < MAX_REFERENCE_AUDIOS; i++) {
@@ -726,7 +818,7 @@ function renderSourceSlot(el, imageFile) {
     if (imageFile) {
         el.innerHTML = `<img src="${viewUrl(imageFile)}" alt="">`;
     } else {
-        el.textContent = "上传源图";
+        el.textContent = t("batch.uploadSource");
     }
 }
 
@@ -734,7 +826,7 @@ function renderRefSlot(el, ref, slot, index, editor) {
     const label = refImageLabel(slot);
     el.classList.toggle("has-img", !!ref?.imageFile);
     el.innerHTML = "";
-    el.title = `${label} — 点击上传；拖到其他格可移动`;
+    el.title = t("ref.clickUploadMove", { label });
     if (ref?.imageFile) {
         const img = document.createElement("img");
         img.src = viewUrl(ref.imageFile);
@@ -783,13 +875,13 @@ function mountVideoPreview(el, seg, running, fps) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
-        el.textContent = "生成中…";
+        el.textContent = t("batch.generating");
         return;
     }
     const frames = (seg.previewFrames?.length ? seg.previewFrames : null)
         || (seg.previewB64 ? [seg.previewB64] : null);
     if (!frames?.length) {
-        el.textContent = "运行后在此预览视频";
+        el.textContent = t("batch.previewVideoAfterRun");
         return;
     }
     const wrap = document.createElement("div");
@@ -801,10 +893,10 @@ function mountVideoPreview(el, seg, running, fps) {
     const playBtn = document.createElement("button");
     playBtn.type = "button";
     playBtn.className = "bd-btn";
-    playBtn.textContent = "▶ 播放";
+    playBtn.textContent = t("batch.play");
     const meta = document.createElement("div");
     meta.className = "bd-batch-vpreview-meta";
-    meta.textContent = `${frames.length}帧 · ${formatPreviewFps(fps)}fps(预览)`;
+    meta.textContent = t("batch.previewMeta", { n: frames.length, fps: formatPreviewFps(fps) });
     ctrl.appendChild(playBtn);
     wrap.appendChild(canvas);
     wrap.appendChild(ctrl);
@@ -818,7 +910,7 @@ function mountVideoPreview(el, seg, running, fps) {
         state.images = images;
         drawFrame(canvas, images[0]);
     }).catch(() => {
-        meta.textContent = "预览加载失败";
+        meta.textContent = t("batch.previewLoadFailed");
     });
 
     playBtn.onclick = (e) => {
@@ -828,11 +920,11 @@ function mountVideoPreview(el, seg, running, fps) {
             state.playing = false;
             if (state.timer) clearInterval(state.timer);
             state.timer = null;
-            playBtn.textContent = "▶ 播放";
+            playBtn.textContent = t("batch.play");
             return;
         }
         state.playing = true;
-        playBtn.textContent = "⏸ 暂停";
+        playBtn.textContent = t("batch.pause");
         const interval = Math.max(20, 1000 / Math.max(1, fps));
         state.timer = setInterval(() => {
             if (!state.images?.length) return;
@@ -846,7 +938,7 @@ function renderImagePreview(el, seg, running) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
-        el.textContent = "生成中…";
+        el.textContent = t("batch.generating");
         return;
     }
     if (seg.previewB64) {
@@ -856,7 +948,7 @@ function renderImagePreview(el, seg, running) {
         el.appendChild(img);
         return;
     }
-    el.textContent = "运行后在此预览";
+    el.textContent = t("batch.previewAfterRun");
 }
 
 function renderPreview(el, seg, running, isVideo, fps) {
@@ -867,6 +959,7 @@ function renderPreview(el, seg, running, isVideo, fps) {
 export function renderImageBatchGroups(editor) {
     const list = editor.batchList;
     if (!list) return;
+    flushBatchDurationInputs(editor);
     stopAllPlayers(list);
     const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     const variant = imageBatchVariant(key);
@@ -907,10 +1000,15 @@ export function renderImageBatchGroups(editor) {
     editor.timeline.segments.forEach((seg, index) => {
         const isR2v = key === "r2v";
         const card = document.createElement("div");
-        card.className = `bd-batch-card${isR2v ? " bd-batch-r2v" : ""}`;
+        const layoutClass = isR2v
+            ? "bd-batch-r2v"
+            : (variant === "source" ? "bd-batch-source"
+                : (variant === "refs" ? "bd-batch-refs" : "bd-batch-plain"));
+        card.className = `bd-batch-card ${layoutClass}`;
         const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
         const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(index);
-        if (index === editor.selectedIndex) card.classList.add("selected");
+        // No default green "selected" chrome (t2v/i2v/r2v). Run participation is
+        // shown only via run-on / run-skipped when「选择运行」is on.
         if (index === runningIdx) card.classList.add("running");
         if (runSelectOn && runEnabled) card.classList.add("run-on");
         if (runSelectOn && !runEnabled) card.classList.add("run-skipped");
@@ -921,9 +1019,6 @@ export function renderImageBatchGroups(editor) {
                 }
                 if (editor.selectedIndex === index) return;
                 editor.selectedIndex = index;
-                list.querySelectorAll(".bd-batch-card").forEach((el, i) => {
-                    el.classList.toggle("selected", i === index);
-                });
                 editor.scheduleRender?.();
                 editor.updateVideoNameLabel?.();
             };
@@ -957,43 +1052,48 @@ export function renderImageBatchGroups(editor) {
             const secRow = document.createElement("label");
             secRow.className = "bd-batch-fc";
             const curSec = resolveSegmentDurationSec(seg, defaultFrameCount(key));
-            const frames = durationToMiniMaxFrames(curSec, 24);
-            seg.durationSec = curSec;
+            const { frames, durationSec: syncedSec } = durationToClampedMiniMaxFrames(curSec, 24);
+            const playSec = framesToDurationSec(frames, 24);
+            seg.durationSec = syncedSec;
             seg.frameCount = frames;
             seg.length = frames;
-            secRow.innerHTML = `${t("batch.seconds")} <input type="number" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames })}">`;
+            seg._videoFrameCount = frames;
+            secRow.innerHTML = `${t("batch.seconds")} <input type="number" data-batch-sec-index="${index}" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames, play: playSec })}">`;
             const secInput = secRow.querySelector("input");
             const applySec = () => {
-                const sec = clamp(
-                    parseFloat(secInput.value) || defaultDurationSec(key),
-                    minDurationSec(),
-                    maxDurationSec(),
-                );
-                const rounded = Math.round(sec * 100) / 100;
-                const fc = durationToMiniMaxFrames(rounded, 24);
-                // Keep the user's seconds as-is; do NOT rewrite to frames/fps.
-                secInput.value = String(rounded);
-                secInput.title = t("batch.durationTooltip", { frames: fc });
-                seg.durationSec = rounded;
-                seg.frameCount = fc;
-                seg.length = fc;
-                normalizeImageBatchSegments(editor);
+                const updated = applyBatchSegmentDuration(editor, index, secInput.value);
+                if (!updated) return;
+                const play = framesToDurationSec(updated.frameCount, 24);
+                secInput.value = String(updated.durationSec);
+                secInput.title = t("batch.durationTooltip", {
+                    frames: updated.frameCount,
+                    play,
+                });
                 editor.scheduleTimelineSync();
                 editor.scheduleRender?.();
                 editor.updateVideoNameLabel?.();
                 editor.updateOutputPreview?.();
+                // Keep total_frames widget in sync with sum of group frames.
+                if (editor.totalFramesWidget) {
+                    editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
+                }
             };
             secInput.onchange = applySec;
             secInput.oninput = () => {
                 clearTimeout(secInput._t);
-                secInput._t = setTimeout(applySec, 280);
+                secInput._t = setTimeout(applySec, 200);
+            };
+            secInput.onblur = () => {
+                clearTimeout(secInput._t);
+                secInput._t = null;
+                applySec();
             };
             meta.appendChild(secRow);
         }
         const del = document.createElement("button");
         del.type = "button";
         del.className = "bd-batch-del";
-        del.textContent = "删除";
+        del.textContent = t("batch.delete");
         del.disabled = editor.timeline.segments.length <= 1;
         del.onclick = (e) => { e.stopPropagation(); deleteImageBatchGroup(editor, index); };
         meta.appendChild(del);
@@ -1037,12 +1137,12 @@ export function renderImageBatchGroups(editor) {
 
         const prompts = document.createElement("div");
         prompts.className = "bd-batch-prompts";
-        const ph = isR2v
-            ? "描述画面与运动；可用 <Picture N> / <Video K> / <Audio J>，或输入 @ 引用已上传素材"
-            : "描述要生成的内容（含画面、运镜、音频；MiniMax H3 无反向提示词）";
+        const ph = t(isR2v ? "placeholder.batchR2v" : "placeholder.batchDefault");
         prompts.innerHTML = `
-            <span class="bd-label">提示词</span>
-            <textarea data-f="prompt" placeholder="${ph}">${seg.prompt || ""}</textarea>`;
+            <span class="bd-label">${t("batch.prompt")}</span>
+            <textarea data-f="prompt" placeholder=""></textarea>`;
+        prompts.querySelector("textarea").placeholder = ph;
+        prompts.querySelector("textarea").value = seg.prompt || "";
         const promptEl = prompts.querySelector('[data-f="prompt"]');
         promptEl.oninput = (e) => {
             seg.prompt = e.target.value;

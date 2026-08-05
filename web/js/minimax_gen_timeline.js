@@ -84,7 +84,11 @@ export function isCustomAspectRatio(aspectRatio) {
 /**
  * Official MiniMax frame formula from workflow templates:
  * max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17
- * where a = duration seconds.
+ * where a = duration seconds (UI stores 1 decimal place, matching official workflows).
+ *
+ * Note for t2v/i2v UI: group "秒数" is the user intent; the toolbar tag Xs (Yf) and
+ * output preview seconds use aligned frames (Yf / fps). Play length can differ slightly
+ * from the typed seconds (e.g. 7 → 175f ≈ 7.3s) — that is snap, not an 8s hard cap.
  */
 export function durationToMiniMaxFrames(seconds, fps = 24) {
     const a = Math.max(0.1, Number(seconds) || 0.1);
@@ -98,6 +102,13 @@ export function alignMiniMaxFrameCount(n) {
     n = Math.max(5, parseInt(n, 10) || 5);
     while (n % 17 !== 5) n += 1;
     return n;
+}
+
+/** Round user-facing duration to 1 decimal place (official workflow step). */
+export function roundDurationSec(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return 0.1;
+    return Math.round(n * 10) / 10;
 }
 
 /** Raw inverse: frames → seconds (may look ugly, e.g. 124 → 5.17). Prefer preferredDurationSecFromFrames for UI. */
@@ -123,9 +134,9 @@ export function preferredDurationSecFromFrames(frames, fps = 24) {
     const dHi = Math.ceil(rough * 10) + 2;
     for (let t = dLo; t <= dHi; t++) {
         const s = t / 10;
-        if (durationToMiniMaxFrames(s, fps) === f) return Math.round(s * 10) / 10;
+        if (durationToMiniMaxFrames(s, fps) === f) return roundDurationSec(s);
     }
-    return Math.round(rough * 100) / 100;
+    return roundDurationSec(rough);
 }
 
 /** Snap width/height to MiniMax canvas multiple (default 32). */
@@ -286,11 +297,35 @@ export function minFrameCount(taskKey) {
 }
 
 export function minDurationSec() {
-    return framesToDurationSec(5, 24);
+    return roundDurationSec(framesToDurationSec(5, 24)) || 0.2;
 }
 
+/** Max 1-decimal seconds whose aligned frame count still fits in MAX_GEN_FRAMES. */
 export function maxDurationSec() {
-    return framesToDurationSec(MAX_GEN_FRAMES, 24);
+    let sec = roundDurationSec(framesToDurationSec(MAX_GEN_FRAMES, 24));
+    while (sec > 0.1 && durationToMiniMaxFrames(sec, 24) > MAX_GEN_FRAMES) {
+        sec = roundDurationSec(sec - 0.1);
+    }
+    return sec;
+}
+
+/**
+ * Frame count for a duration, capped to MAX_GEN_FRAMES on the 17k+5 grid.
+ * Returns the 1-decimal seconds that produced that count (may step down near the cap).
+ */
+export function durationToClampedMiniMaxFrames(seconds, fps = 24) {
+    let sec = roundDurationSec(seconds);
+    let fc = durationToMiniMaxFrames(sec, fps);
+    while (sec > 0.1 && fc > MAX_GEN_FRAMES) {
+        sec = roundDurationSec(sec - 0.1);
+        fc = durationToMiniMaxFrames(sec, fps);
+    }
+    if (fc > MAX_GEN_FRAMES) {
+        fc = alignMiniMaxFrameCount(MAX_GEN_FRAMES);
+        while (fc > MAX_GEN_FRAMES) fc -= 17;
+        sec = preferredDurationSecFromFrames(fc, fps);
+    }
+    return { frames: fc, durationSec: sec };
 }
 
 export function sumFrameCounts(segments) {
@@ -314,8 +349,12 @@ export function newBatchSegment(overrides = {}) {
     } else if (overrides.frameCount != null || overrides.length != null) {
         durationSec = preferredDurationSecFromFrames(overrides.frameCount ?? overrides.length, 24);
     }
-    durationSec = Math.round(durationSec * 100) / 100;
-    const fc = isVideo ? durationToMiniMaxFrames(durationSec, 24) : 1;
+    let fc = 1;
+    if (isVideo) {
+        const resolved = durationToClampedMiniMaxFrames(durationSec, 24);
+        durationSec = resolved.durationSec;
+        fc = resolved.frames;
+    }
     return {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
         start: 0,

@@ -5,7 +5,10 @@ import {
     DEFAULT_ASPECT_RATIO,
     DEFAULT_MEGAPIXELS,
     defaultFrameCount,
+    durationToClampedMiniMaxFrames,
     framesToDurationSec,
+    preferredDurationSecFromFrames,
+    roundDurationSec,
     genLayoutHint,
     getDirectorMode,
     imageBatchRequiresFixedOutput,
@@ -76,7 +79,6 @@ import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     applyI18nDom,
     aspectDisplayLabel,
-    getLocale,
     onLocaleChange,
     t,
     taskDisplayLabel,
@@ -151,12 +153,50 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     clear_vram_between_segments: "widget.clearVram",
     export_source_images: "widget.exportSourceImages",
+    control_after_generate: "widget.controlAfterGenerate",
+    "control after generate": "widget.controlAfterGenerate",
+};
+
+const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
+    clear_vram_between_segments: "widget.tooltip.clearVram",
+    export_source_images: "widget.tooltip.exportSourceImages",
+};
+
+const DIRECTOR_GROUP_LABEL_KEYS = {
+    bd_grp_sample: "widget.grpSample",
+    bd_grp_advanced: "widget.grpAdvanced",
+    bd_grp_perf: "widget.grpPerf",
 };
 
 function applyDirectorWidgetLabels(node) {
     for (const w of node.widgets || []) {
-        const key = DIRECTOR_WIDGET_LABEL_KEYS[w.name];
-        if (key) w.label = t(key);
+        const name = String(w.name || "");
+        const key = DIRECTOR_WIDGET_LABEL_KEYS[name]
+            || (/(control[_\s]?after[_\s]?generate|生成前后)/i.test(name) || /生成前后/.test(String(w.label || ""))
+                ? "widget.controlAfterGenerate"
+                : null);
+        if (key) {
+            w.label = t(key);
+            if (w.options) w.options.label = w.label;
+        }
+        const tipKey = DIRECTOR_WIDGET_TOOLTIP_KEYS[name];
+        if (tipKey && w.options) w.options.tooltip = t(tipKey);
+        const gKey = DIRECTOR_GROUP_LABEL_KEYS[name] || w._mmxGroupI18nKey;
+        if (gKey) {
+            const label = t(gKey);
+            w._mmxGroupI18nKey = gKey;
+            w._bdGroupLabel = label;
+            w.value = label;
+            if (w.element) w.element.textContent = label;
+        }
+        // Linked seed → control_after_generate combo (ComfyUI core).
+        for (const linked of w.linkedWidgets || []) {
+            const ln = String(linked?.name || linked?.label || "");
+            if (/(control[_\s]?after[_\s]?generate|生成前后)/i.test(ln)) {
+                linked.label = t("widget.controlAfterGenerate");
+                if (linked.options) linked.options.label = linked.label;
+            }
+        }
     }
 }
 
@@ -183,7 +223,8 @@ function drawGroupHeader(ctx, node, widget_width, y, H, label) {
 
 function makeGroupHeaderWidget(inputName, inputData) {
     const opts = inputData?.[1] || {};
-    const label = opts.default || opts.label || inputName;
+    const i18nKey = DIRECTOR_GROUP_LABEL_KEYS[inputName];
+    const label = i18nKey ? t(i18nKey) : (opts.default || opts.label || inputName);
     const el = document.createElement("div");
     el.className = "bd-widget-group";
     el.textContent = label;
@@ -202,8 +243,11 @@ function makeGroupHeaderWidget(inputName, inputData) {
         element: el,
         options: opts,
         _bdGroupHeader: true,
+        _mmxGroupI18nKey: i18nKey || null,
+        _bdGroupLabel: label,
         draw(ctx, node, widget_width, y, H) {
-            drawGroupHeader(ctx, node, widget_width, y, H, label);
+            const text = this._mmxGroupI18nKey ? t(this._mmxGroupI18nKey) : (this._bdGroupLabel || label);
+            drawGroupHeader(ctx, node, widget_width, y, H, text);
         },
         computeSize(width) {
             return [width, 26];
@@ -399,9 +443,7 @@ function isUploadSizeError(err) {
 
 function formatUploadError(err) {
     const msg = String(err?.message || err);
-    if (isUploadSizeError(err)) {
-        return "文件超过 ComfyUI 默认上传限制（100MB）。已尝试分块上传；若仍失败，请手动复制视频到 ComfyUI/input/ 后刷新，或启动时加参数 --max-upload-size 2048";
-    }
+    if (isUploadSizeError(err)) return t("upload.sizeLimitDetail");
     return msg;
 }
 
@@ -445,13 +487,13 @@ async function uploadVideoChunked(file, onProgress) {
         const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
         if (!resp.ok) {
             const text = await resp.text();
-            throw new Error(text || `分块上传失败 (${resp.status})`);
+            throw new Error(text || t("upload.chunkFailed", { status: resp.status }));
         }
         onProgress?.((i + 1) / totalChunks, i + 1, totalChunks);
         const data = await resp.json();
         if (data.name) return data;
     }
-    throw new Error("分块上传未完成");
+    throw new Error(t("upload.chunkIncomplete"));
 }
 
 async function uploadToInputSmart(file, onProgress) {
@@ -1630,7 +1672,7 @@ class MiniMaxH3DirectorEditor {
             });
         }
         if (this.stageBadge) {
-            this.stageBadge.title = "点击输入精确帧号";
+            this.stageBadge.title = t("player.badgeJump");
             this.stageBadge.addEventListener("click", (e) => {
                 e.stopPropagation();
                 if (this.isPlaying) this._stopPlay();
@@ -1760,14 +1802,14 @@ class MiniMaxH3DirectorEditor {
                 // Edge drag is always horizontal (change start/length); keep ↔ cursor.
                 this.canvas.style.cursor = "ew-resize";
                 this.canvas.title = this.isFl2vMode()
-                    ? "拖动：调整本镜时长（后面各组跟着移）"
+                    ? t("tooltip.dragFl2vDuration")
                     : "";
             } else if (hit?.type === "segment" && (this.isFl2vMode() || this.isR2vBatch() || this.timeline.segments.length >= 2)) {
                 this.canvas.classList.add("bd-grab");
                 this.canvas.style.cursor = "";
                 this.canvas.title = this.isFl2vMode()
-                    ? "拖动：与其它镜交换位置（双击替换首帧）"
-                    : (this.isR2vBatch() ? "拖动：调整素材组顺序" : "拖动：调整片段顺序");
+                    ? t("tooltip.dragFl2vSwap")
+                    : (this.isR2vBatch() ? t("tooltip.dragR2vOrder") : t("tooltip.dragSegmentOrder"));
             } else {
                 this.canvas.style.cursor = "";
                 this.canvas.title = "";
@@ -2151,13 +2193,13 @@ class MiniMaxH3DirectorEditor {
         const cards = this.batchList.querySelectorAll(".bd-batch-card");
         cards.forEach((el, i) => {
             const runOn = !runSelectOn || this.isSegmentRunEnabled(i);
-            el.classList.toggle("selected", i === this.selectedIndex);
+            // No green "selected" chrome — only run-select participation.
+            el.classList.remove("selected");
             el.classList.toggle("run-on", runSelectOn && runOn);
             el.classList.toggle("run-skipped", runSelectOn && !runOn);
             const cb = el.querySelector(".bd-batch-run-check");
             if (cb) cb.checked = runOn;
         });
-        cards[this.selectedIndex]?.scrollIntoView?.({ block: "nearest" });
     }
 
     onTaskTypeChanged(value) {
@@ -2572,15 +2614,25 @@ class MiniMaxH3DirectorEditor {
             setFl2vToolbar(this, false);
             setToolbarDisabledForBatch(this, false);
             setR2vToolbar(this, true);
-            if (this.btnVideo) this.btnVideo.textContent = "上传视频";
+            if (this.btnVideo) {
+                this.btnVideo.textContent = t("toolbar.uploadVideo");
+                this.btnVideo.setAttribute("data-i18n", "toolbar.uploadVideo");
+            }
             updateFl2vToolbarBtns(this);
         } else {
             setFl2vToolbar(this, false);
             setR2vToolbar(this, false);
             setToolbarDisabledForBatch(this, isBatch);
-            if (this.btnVideo) this.btnVideo.textContent = "上传视频";
+            if (this.btnVideo) {
+                this.btnVideo.textContent = t("toolbar.uploadVideo");
+                this.btnVideo.setAttribute("data-i18n", "toolbar.uploadVideo");
+            }
             const del = this.root?.querySelector('[data-a="del"]');
-            if (del) del.textContent = "删除片段";
+            if (del) {
+                del.textContent = t("toolbar.deleteSegment");
+                del.setAttribute("data-i18n", "toolbar.deleteSegment");
+                del.setAttribute("data-i18n-title", "tooltip.deleteSegment");
+            }
             updateFl2vToolbarBtns(this);
             updateR2vToolbarBtns(this);
         }
@@ -2689,15 +2741,15 @@ class MiniMaxH3DirectorEditor {
         }
         if (!has) {
             el.innerHTML = "";
-            el.textContent = "点击上传参考视频";
+            el.textContent = t("panel.uploadRefVideo");
             el.onclick = () => this.pickReferenceVideoFile();
             return;
         }
         const viewUrl = this.getReferenceVideoViewUrl(ref);
         el.innerHTML = `
             <video class="bd-ref-video-preview" muted playsinline preload="metadata" controls></video>
-            <button type="button" class="bd-ref-replace" title="更换参考视频">更换</button>
-            <span class="x" title="移除参考视频">×</span>`;
+            <button type="button" class="bd-ref-replace" title="${t("ref.replace")}">${t("ref.replace")}</button>
+            <span class="x" title="${t("ref.removeVideo")}">×</span>`;
         el.onclick = null;
         const video = el.querySelector("video");
         if (video && viewUrl) {
@@ -2768,7 +2820,7 @@ class MiniMaxH3DirectorEditor {
     async loadReferenceVideoFile(file) {
         const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
         const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
-        const status = `上传中: ${file.name}…`;
+        const status = t("upload.inProgress", { name: file.name });
         if (slotEl) {
             slotEl.classList.remove("has-img", "has-video");
             slotEl.textContent = status;
@@ -2777,8 +2829,12 @@ class MiniMaxH3DirectorEditor {
         try {
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? "分块" : "上传";
-                if (nameEl) nameEl.textContent = `${mode}参考视频: ${file.name} (${cur}/${total}, ${pct}%)…`;
+                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                if (nameEl) {
+                    nameEl.textContent = t("upload.refVideoProgress", {
+                        mode, name: file.name, cur, total, pct,
+                    });
+                }
             });
             const relPath = videoRelativePath(uploaded);
             const prep = await this._prepareVideoFrames({
@@ -2786,7 +2842,7 @@ class MiniMaxH3DirectorEditor {
                 relPath,
                 subfolder: uploaded.subfolder || "",
                 type: uploaded.type || "input",
-                statusPrefix: "解析参考视频",
+                statusPrefix: t("parse.refVideo"),
                 syncNativeFps: false,
             });
             this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
@@ -2794,7 +2850,7 @@ class MiniMaxH3DirectorEditor {
             this.commit(false, { syncTimeline: true });
         } catch (err) {
             console.error("[MiniMax H3Director] reference video load failed:", err);
-            if (nameEl) nameEl.textContent = `参考视频加载失败: ${formatUploadError(err)}`;
+            if (nameEl) nameEl.textContent = t("upload.refVideoFailed", { err: formatUploadError(err) });
             this.renderRefVideoSlot();
         }
     }
@@ -2922,18 +2978,33 @@ class MiniMaxH3DirectorEditor {
             const n = this.timeline.segments?.length || 0;
             const key = this.getTaskKey();
             if (isVideoBatchTask(key)) {
-                const total = this.getTotalFrames();
+                // Always derive label totals from durationSec (same source as group inputs).
                 const segs = this.timeline.segments || [];
-                const sec = Math.round(segs.reduce((s, seg) => {
-                    const v = Number(seg.durationSec);
-                    return s + (Number.isFinite(v) ? v : 0);
-                }, 0) * 100) / 100;
+                let sec = 0;
+                let total = 0;
+                for (const seg of segs) {
+                    const raw = Number(seg.durationSec);
+                    const resolved = durationToClampedMiniMaxFrames(
+                        Number.isFinite(raw)
+                            ? raw
+                            : preferredDurationSecFromFrames(
+                                seg.frameCount ?? seg.length ?? defaultFrameCount(key),
+                                24,
+                            ),
+                        24,
+                    );
+                    sec += resolved.durationSec;
+                    total += resolved.frames;
+                }
+                sec = roundDurationSec(sec);
+                const play = framesToDurationSec(total, 24);
                 this.videoNameEl.textContent = total
                     ? t("videoName.batchVideo", {
                         key,
                         n,
-                        sec: sec || framesToDurationSec(total, this.getFrameRate()),
+                        sec: sec || play,
                         frames: total,
+                        play,
                     })
                     : t("videoName.batchVideoEmpty", { key, n });
             } else {
@@ -2970,9 +3041,9 @@ class MiniMaxH3DirectorEditor {
             const tlFps = this.getFrameRate();
             const dur = this.getTimelineDurationSec().toFixed(2);
             const name = c.fileName || c.videoFile;
-            this.videoNameEl.textContent = getLocale() === "en"
-                ? `${name} (${total}f · timeline ${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`
-                : `${name} (${total}f · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`;
+            this.videoNameEl.textContent = t("videoName.singleClip", {
+                name, total, fps: formatProbeFps(tlFps), dur, native: nativeHint, dim,
+            });
             return;
         }
         const tlFps = this.getFrameRate();
@@ -3260,7 +3331,12 @@ class MiniMaxH3DirectorEditor {
         // fl2v: visual canvas may be longer than the sampling window (overflow = dashed).
         if (this.isFl2vMode()) return getFl2vVisualFrames(this);
         if (this.isImageBatch() || this.isGenMode()) {
-            return sumFrameCounts(this._previewSegments || this.timeline.segments);
+            // t2v/i2v: never use drag preview for totals (inputs are the source of truth).
+            // r2v may temporarily use _previewSegments while resizing on the timeline.
+            if (this.isR2vBatch() && this._previewSegments) {
+                return sumFrameCounts(this._previewSegments);
+            }
+            return sumFrameCounts(this.timeline.segments);
         }
         const mapLen = this.timeline?.video?.frameMap?.length || 0;
         if (mapLen > 0) return mapLen;
@@ -4147,8 +4223,8 @@ class MiniMaxH3DirectorEditor {
         const frame = clamp(logicalFrame | 0, 0, Math.max(0, total - 1));
         const clips = this.getVideoClips();
         const entry = this.getFrameMapEntry(frame);
-        const clipHint = clips.length > 1 ? ` · 片${entry.clip + 1}` : "";
-        this.stageBadge.textContent = `帧 ${frame + 1}/${total}${clipHint}`;
+        const clipHint = clips.length > 1 ? t("canvas.clipHint", { n: entry.clip + 1 }) : "";
+        this.stageBadge.textContent = t("player.frameOf", { cur: frame + 1, total, clip: clipHint });
         this.stageBadge.classList.remove("hidden");
     }
 
@@ -4421,7 +4497,10 @@ class MiniMaxH3DirectorEditor {
         if (legacy.length && !video.videoFile) {
             this._legacyFrames = legacy;
             this.setFrameMap(buildIdentityFrameMap(legacy.length));
-            this.videoNameEl.textContent = `${video.fileName || "视频"} (${legacy.length}f · 旧版内嵌)`;
+            this.videoNameEl.textContent = t("videoName.legacy", {
+                name: video.fileName || t("videoName.defaultVideo"),
+                frames: legacy.length,
+            });
             this._prefetchSegmentThumbs(0, legacy.length);
             this.updateStageVisibility();
             return;
@@ -4485,8 +4564,8 @@ class MiniMaxH3DirectorEditor {
     pickAppendVideoFile() {
         if (!this.hasVideo()) {
             this.showBdMessage(
-                "追加视频",
-                "请先上传第一个视频，再使用「追加视频」。"
+                t("dialog.appendVideoTitle"),
+                t("dialog.appendVideoNeedFirst")
             );
             return;
         }
@@ -4498,13 +4577,15 @@ class MiniMaxH3DirectorEditor {
 
     async appendVideoFile(file) {
         const btn = this.root.querySelector('[data-a="video-append"]');
-        if (btn) { btn.disabled = true; btn.textContent = "上传中…"; }
-        this.videoNameEl.textContent = `追加中: ${file.name}…`;
+        if (btn) { btn.disabled = true; btn.textContent = t("common.uploading"); }
+        this.videoNameEl.textContent = t("upload.appendProgress", { name: file.name });
         try {
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? "分块" : "上传";
-                this.videoNameEl.textContent = `追加${mode}: ${file.name} (${cur}/${total}, ${pct}%)…`;
+                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                this.videoNameEl.textContent = t("upload.appendChunk", {
+                    mode, name: file.name, cur, total, pct,
+                });
             });
             const relPath = videoRelativePath(uploaded);
             await this._applyAppendedVideo({
@@ -4512,27 +4593,32 @@ class MiniMaxH3DirectorEditor {
                 relPath,
                 subfolder: uploaded.subfolder || "",
                 type: uploaded.type || "input",
-                statusPrefix: "解析",
+                statusPrefix: t("parse.prefix"),
             });
         } catch (err) {
             console.error("[MiniMax H3Director] append video failed:", err);
-            this.videoNameEl.textContent = `追加失败: ${formatUploadError(err)}`;
+            this.videoNameEl.textContent = t("upload.appendFailed", { err: formatUploadError(err) });
             this.updateVideoNameLabel();
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = "追加视频"; }
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = t("toolbar.appendVideo");
+            }
         }
     }
 
     async loadVideoFile(file) {
         const btn = this.root.querySelector('[data-a="video"]');
-        if (btn) { btn.disabled = true; btn.textContent = "上传中…"; }
-        this.videoNameEl.textContent = `上传中: ${file.name}…`;
+        if (btn) { btn.disabled = true; btn.textContent = t("common.uploading"); }
+        this.videoNameEl.textContent = t("upload.inProgress", { name: file.name });
         try {
             this._resetTimelineForReplaceUpload();
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? "分块" : "上传";
-                this.videoNameEl.textContent = `${mode}中: ${file.name} (${cur}/${total}, ${pct}%)…`;
+                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                this.videoNameEl.textContent = t("upload.loadChunk", {
+                    mode, name: file.name, cur, total, pct,
+                });
             });
             const relPath = videoRelativePath(uploaded);
             await this._applyLoadedVideo({
@@ -4540,14 +4626,17 @@ class MiniMaxH3DirectorEditor {
                 relPath,
                 subfolder: uploaded.subfolder || "",
                 type: uploaded.type || "input",
-                statusPrefix: "解析",
+                statusPrefix: t("parse.prefix"),
             });
         } catch (err) {
             console.error("[MiniMax H3Director] video load failed:", err);
-            this.videoNameEl.textContent = `加载失败: ${formatUploadError(err)}`;
+            this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
             this._resetTimelineForReplaceUpload();
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = "上传视频"; }
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = t("toolbar.uploadVideo");
+            }
         }
     }
 
@@ -4563,10 +4652,15 @@ class MiniMaxH3DirectorEditor {
     }
 
     showBdMessage(title, message) {
-        return this.showBdDialog({ title, message, confirmText: "确定", cancelText: null });
+        return this.showBdDialog({ title, message, confirmText: t("dialog.confirm"), cancelText: null });
     }
 
-    showBdDialog({ title, message, items, confirmText = "确定", cancelText = "取消" }) {
+    showBdDialog(opts = {}) {
+        const { title, message, items } = opts;
+        const confirmText = opts.confirmText ?? t("dialog.confirm");
+        const cancelText = Object.prototype.hasOwnProperty.call(opts, "cancelText")
+            ? opts.cancelText
+            : t("dialog.cancel");
         return new Promise((resolve) => {
             this._closeBdModal();
 
@@ -4843,7 +4937,7 @@ class MiniMaxH3DirectorEditor {
         video.preload = "metadata";
         await new Promise((res, rej) => {
             video.onloadedmetadata = () => res();
-            video.onerror = () => rej(new Error("无法读取视频元数据"));
+            video.onerror = () => rej(new Error(t("upload.metaReadFailed")));
         });
         return {
             width: video.videoWidth || 0,
@@ -5290,7 +5384,7 @@ class MiniMaxH3DirectorEditor {
                     const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
                     seg.frameCount = fc;
                     seg.length = fc;
-                    seg.durationSec = Math.round(framesToDurationSec(fc, 24) * 100) / 100;
+                    seg.durationSec = preferredDurationSecFromFrames(fc, 24);
                 }
                 normalizeImageBatchSegments(this);
                 this.renderImageBatchGroups();
@@ -5470,16 +5564,16 @@ class MiniMaxH3DirectorEditor {
             && this.getEditableSplitFrames().includes(this.selectedSplitFrame);
         if (bar) bar.classList.toggle("hidden", !has);
         if (hint && has) {
-            hint.textContent = `已选中分割点（帧 ${this.selectedSplitFrame}）。点击右侧按钮删除并合并相邻段。`;
+            hint.textContent = t("split.hintSelected", { f: this.selectedSplitFrame });
         }
         if (btn) {
             btn.disabled = !has;
             btn.title = has
-                ? `删除选中分割点（帧 ${this.selectedSplitFrame}），合并相邻两段`
-                : "先点击青色分割点选中";
+                ? t("split.tooltipDelete", { f: this.selectedSplitFrame })
+                : t("split.tooltipSelectFirst");
         }
         if (has && this.boundsEl) {
-            this.boundsEl.textContent = `已选中分割点: 帧 ${this.selectedSplitFrame}`;
+            this.boundsEl.textContent = t("split.boundsSelected", { f: this.selectedSplitFrame });
         }
     }
 
@@ -5529,26 +5623,26 @@ class MiniMaxH3DirectorEditor {
     async smartSplit() {
         if (this.isGenMode() || this.isImageBatch()) return;
         if (!this.hasVideo()) {
-            this.setSmartSplitMessage("请先上传视频后再使用智能分割。");
+            this.setSmartSplitMessage(t("smartSplit.needVideo"));
             return;
         }
         const total = this.getTotalFrames();
         if (total < MIN_SEG * 2) {
-            this.setSmartSplitMessage("视频太短，无法智能分割。");
+            this.setSmartSplitMessage(t("smartSplit.tooShort"));
             return;
         }
         const ranges = this.getClipLogicalRanges();
         if (!ranges.length) {
-            this.setSmartSplitMessage("未找到可用的视频素材。");
+            this.setSmartSplitMessage(t("smartSplit.noMaterial"));
             return;
         }
         const btn = this.root?.querySelector('[data-a="smart-split"]');
         const prevLabel = btn?.textContent;
         if (btn) {
             btn.disabled = true;
-            btn.textContent = "分析中…";
+            btn.textContent = t("common.analyzing");
         }
-        this.setSmartSplitMessage("正在分析分镜…");
+        this.setSmartSplitMessage(t("smartSplit.analyzing"));
         try {
             const clips = ranges.map((r) => ({
                 videoFile: r.clip.videoFile || r.clip.fileName,
@@ -5582,7 +5676,7 @@ class MiniMaxH3DirectorEditor {
             const forced = new Set([0, total, ...clipBounds]);
             const newSegs = this._buildSegmentsFromSplitPoints([...points], forced);
             if (!newSegs?.length) {
-                this.setSmartSplitMessage("智能分割未生成有效片段。");
+                this.setSmartSplitMessage(t("smartSplit.noSegments"));
                 return;
             }
             this.timeline.segments = newSegs;
@@ -5596,16 +5690,16 @@ class MiniMaxH3DirectorEditor {
                 ? ` ${data.warnings[0]}`
                 : "";
             this.setSmartSplitMessage(
-                `完成：约 ${shotCount} 个镜头 → ${newSegs.length} 段。您也可以根据自己的需要，选择分割点进行删除，或者手动增加分割点。${warn}`,
+                t("smartSplit.done", { shots: shotCount, segs: newSegs.length }) + (warn || ""),
                 { ok: !warn },
             );
         } catch (err) {
             console.error("[MiniMax H3 Director] smartSplit failed", err);
-            this.setSmartSplitMessage(`智能分割失败：${err?.message || err}`);
+            this.setSmartSplitMessage(t("smartSplit.failed", { err: err?.message || err }));
         } finally {
             if (btn) {
                 btn.disabled = false;
-                btn.textContent = prevLabel || "智能分割";
+                btn.textContent = prevLabel || t("toolbar.smartSplit");
             }
         }
     }
@@ -5817,7 +5911,7 @@ class MiniMaxH3DirectorEditor {
                 ctx.font = "12px sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText("上传图片1", startX + pxWidth / 2, y0 + h / 2);
+                ctx.fillText(t("canvas.uploadPicture1"), startX + pxWidth / 2, y0 + h / 2);
             }
             ctx.restore();
             return;
@@ -5839,7 +5933,7 @@ class MiniMaxH3DirectorEditor {
             ctx.fillText(`${fc}f`, startX + pxWidth / 2, y0 + h / 2 - 6);
             ctx.fillStyle = "#555";
             ctx.font = "10px sans-serif";
-            ctx.fillText("空白画布", startX + pxWidth / 2, y0 + h / 2 + 8);
+            ctx.fillText(t("canvas.blankCanvas"), startX + pxWidth / 2, y0 + h / 2 + 8);
             ctx.restore();
             return;
         }
@@ -5875,7 +5969,7 @@ class MiniMaxH3DirectorEditor {
                 ctx.font = "12px sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText("点击上传源图片", startX + pxWidth / 2, y0 + h / 2);
+                ctx.fillText(t("canvas.uploadSourceImage"), startX + pxWidth / 2, y0 + h / 2);
             }
             ctx.restore();
             return;
@@ -5995,7 +6089,7 @@ class MiniMaxH3DirectorEditor {
         ctx.font = "bold 10px sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText("拖动中", gx + 8, gy + 12);
+        ctx.fillText(t("canvas.dragging"), gx + 8, gy + 12);
         ctx.restore();
     }
 
@@ -6139,7 +6233,9 @@ class MiniMaxH3DirectorEditor {
             const a = seg.start + 1;
             const b = seg.start + seg.length;
             const rangeText = `${a}-${b}`;
-            this.ctx.fillStyle = i === this.selectedIndex ? "#eee" : "#9a9a9a";
+            // Multi-shot UIs: no default "first selected" label emphasis (v2v keeps it).
+            const showSegSel = !(this.isFl2vMode() || this.isImageBatch() || this.isGenMode());
+            this.ctx.fillStyle = (showSegSel && i === this.selectedIndex) ? "#eee" : "#9a9a9a";
             let draw = rangeText;
             if (this.ctx.measureText(draw).width > pxW - 6) {
                 while (draw.length > 1 && this.ctx.measureText(`${draw}…`).width > pxW - 6) {
@@ -6183,13 +6279,16 @@ class MiniMaxH3DirectorEditor {
         const reordering = this._drag?.kind === "reorder";
         const dragFromRank = reordering ? this._drag.fromRank : -1;
         const dropRank = reordering ? this._reorderDropRank : -1;
+        // fl2v / batch (t2v·i2v·r2v) / gen: no default first-item selection border.
+        // Video (v2v) keeps selection chrome for edit context.
+        const showSegSel = !(this.isFl2vMode() || this.isImageBatch() || this.isGenMode());
 
         for (let i = 0; i < segs.length; i++) {
             const seg = segs[i];
             const x0 = this.frameToX(seg.start, width);
             const x1 = this.frameToX(seg.start + seg.length, width);
             const pxW = x1 - x0;
-            const sel = i === this.selectedIndex;
+            const sel = showSegSel && i === this.selectedIndex;
             const running = i === this._runHighlightSeg;
             const runOn = this.isSegmentRunEnabled(i);
             const fl2vStart = !this.isFl2vMode() || !!seg.isStartFrame;
@@ -6220,7 +6319,7 @@ class MiniMaxH3DirectorEditor {
                 this.ctx.strokeRect(x0 + 1, TRACK_Y + 1, pxW - 2, TRACK_H - 2);
                 this.ctx.setLineDash([]);
                 this.ctx.fillStyle = "rgba(20,40,28,0.92)";
-                const label = this.isFl2vMode() ? "交换到此处" : "插入到此处";
+                const label = this.isFl2vMode() ? t("canvas.swapHere") : t("canvas.insertHere");
                 this.ctx.font = "bold 11px sans-serif";
                 const tw = this.ctx.measureText(label).width + 12;
                 this.ctx.fillRect(x0 + (pxW - tw) / 2, TRACK_Y + 8, tw, 18);
@@ -6363,7 +6462,7 @@ class MiniMaxH3DirectorEditor {
             this.ctx.setLineDash([]);
             this.ctx.fillStyle = "#66aaff";
             this.ctx.font = "10px sans-serif";
-            this.ctx.fillText(`导出 ${exportTotal}`, capX + 4, TRACK_Y + 12);
+            this.ctx.fillText(t("canvas.exportCap", { n: exportTotal }), capX + 4, TRACK_Y + 12);
         }
     }
 
@@ -6388,7 +6487,7 @@ class MiniMaxH3DirectorEditor {
         if (this.seekBar) this.seekBar.max = Math.max(0, totalFrames - 1);
         if (this.selectedSplitFrame != null && this.getEditableSplitFrames().includes(this.selectedSplitFrame)) {
             if (this.boundsEl) {
-                this.boundsEl.textContent = `分割点: 帧 ${this.selectedSplitFrame} · 可删除合并相邻段`;
+                this.boundsEl.textContent = t("split.boundsEditable", { f: this.selectedSplitFrame });
             }
         } else {
             const seg = segs[this.selectedIndex];
@@ -6466,7 +6565,7 @@ class MiniMaxH3DirectorEditor {
             this.renderGenSrcSlot(
                 this.genGlobalImg,
                 this.timeline.global?.genImage?.imageFile,
-                "点击上传源图片",
+                t("panel.uploadSourceImage"),
             );
         }
         if (this.isGenMode() && this.isGlobalMode()) {
@@ -6483,20 +6582,28 @@ class MiniMaxH3DirectorEditor {
         let info;
         if (this.isGenMode()) {
             const fc = seg.frameCount ?? seg.length;
-            info = `${fc} 帧`;
-            if (this.isGenImage()) info += seg.genImage?.imageFile ? " · 已上传图片" : " · 未上传图片";
+            info = t("segment.infoFrames", { n: fc });
+            if (this.isGenImage()) {
+                info += seg.genImage?.imageFile ? t("segment.uploadedImage") : t("segment.noImage");
+            }
         } else {
-            info = `帧 ${seg.start}–${seg.start + seg.length} (${seg.length}f) · ${(seg.length / fps).toFixed(2)}s`;
+            info = t("segment.infoRange", {
+                start: seg.start,
+                end: seg.start + seg.length,
+                length: seg.length,
+                sec: (seg.length / fps).toFixed(2),
+            });
             const clips = this.getVideoClips();
             if (clips.length > 1) {
                 const clip = clips[this.getSegmentClipIndex(seg)];
-                const clipName = clip?.fileName || clip?.videoFile || `视频 ${this.getSegmentClipIndex(seg) + 1}`;
+                const clipName = clip?.fileName || clip?.videoFile
+                    || t("slot.video", { n: this.getSegmentClipIndex(seg) + 1 });
                 info += ` · ${clipName}`;
             }
             if (taskUsesReferenceVideo(segKey)) {
                 info += seg.referenceVideo?.videoFile || seg.referenceVideo?.fileName
-                    ? " · 已上传参考视频"
-                    : " · 未上传参考视频";
+                    ? t("segment.refVideoUploaded")
+                    : t("segment.refVideoMissing");
             }
         }
         this.segInfo.textContent = info;
@@ -6508,7 +6615,7 @@ class MiniMaxH3DirectorEditor {
             this.renderRefAudioSlots();
         }
         if (this.isGenImage() && !this.isGlobalMode()) {
-            this.renderGenSrcSlot(this.genSegImg, seg.genImage?.imageFile, "点击上传片段源图片");
+            this.renderGenSrcSlot(this.genSegImg, seg.genImage?.imageFile, t("panel.uploadSegmentSourceImage"));
         }
         if (this.isGenMode() && !this.isGlobalMode()) {
             const fc = seg.frameCount ?? seg.length ?? defaultFrameCount(this.getTaskKey());
@@ -6528,7 +6635,7 @@ class MiniMaxH3DirectorEditor {
             el.dataset.refSlot = String(i);
             el.dataset.refScope = isGlobal ? "global" : "seg";
             const label = refImageLabel(i);
-            el.title = `${label} — 点击上传；拖到其他格可移动`;
+            el.title = t("ref.slotTitle", { label });
             const ref = (refs || []).find((r) => Number(r.index ?? r.slot) === i);
             const tag = document.createElement("span");
             tag.className = "bd-ref-tag";
@@ -6672,8 +6779,8 @@ class MiniMaxH3DirectorEditor {
             const ref = (target.refAudios || []).find((r) => Number(r.index ?? r.slot) === i);
             const file = ref?.audioFile || ref?.fileName || "";
             el.title = file
-                ? `${label}: ${file} — 点击更换；× 清除`
-                : `${label} — 点击上传参考音频（wav/mp3/flac…）`;
+                ? t("ref.audioTitleFilled", { label, file })
+                : t("ref.audioTitleEmpty", { label });
             if (file) {
                 el.classList.add("has-audio");
                 const tag = document.createElement("span");
@@ -6692,7 +6799,7 @@ class MiniMaxH3DirectorEditor {
                 };
                 el.appendChild(x);
             } else {
-                el.textContent = `${label}\n上传`;
+                el.textContent = t("ref.audioUpload", { label });
             }
             el.onclick = () => this.pickRefAudio(target, i);
             box.appendChild(el);
@@ -6741,7 +6848,7 @@ class MiniMaxH3DirectorEditor {
             this.renderRefAudioSlots();
         } catch (err) {
             console.error("[MiniMax H3Director] ref audio upload failed:", err);
-            alert(`参考音频上传失败：${err?.message || err}`);
+            alert(t("upload.refAudioFailed", { err: err?.message || err }));
         }
     }
 
@@ -7268,7 +7375,7 @@ app.registerExtension({
                 timeline_segment_total: timelineTotal,
                 partial_run: editor.isRunSelectEnabled?.() && segTotal < timelineTotal,
                 phase: "plan",
-                phase_label: "解析时间轴 / 加载视频",
+                phase_label: t("executing.parseTimeline"),
                 phase_value: 0,
                 phase_max: 1,
                 overall_value: 0,
@@ -7280,7 +7387,7 @@ app.registerExtension({
         api.addEventListener("execution_error", ({ detail }) => {
             const node = findDirectorNode(detail?.node_id);
             if (node?._minimaxEditor) {
-                node._minimaxEditor.setRunError(detail?.exception_message || "执行出错");
+                node._minimaxEditor.setRunError(detail?.exception_message || t("executing.error"));
             }
         });
 
@@ -7315,6 +7422,9 @@ app.registerExtension({
             const r = onCreated?.apply(this, arguments);
             normalizeDirectorOutputs(this);
             applyDirectorWidgetLabels(this);
+            // ComfyUI may attach seed's control_after_generate combo after onNodeCreated.
+            queueMicrotask(() => applyDirectorWidgetLabels(this));
+            setTimeout(() => applyDirectorWidgetLabels(this), 0);
             this.size = [1000, 680];
 
             // Idempotent: avoid a second DOM stack if onNodeCreated is wrapped twice.
