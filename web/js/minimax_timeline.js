@@ -73,6 +73,15 @@ import {
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
+import {
+    applyI18nDom,
+    aspectDisplayLabel,
+    getLocale,
+    onLocaleChange,
+    t,
+    taskDisplayLabel,
+    toggleLocale,
+} from "./minimax_i18n.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -138,16 +147,16 @@ const HIDDEN_WIDGETS = [
     // seed stays visible under 采样设置 (with control_after_generate)
 ];
 
-const DIRECTOR_WIDGET_LABELS = {
-    seed: "种子 seed",
-    clear_vram_between_segments: "段间清理显存",
-    export_source_images: "输出原片对比 source_images",
+const DIRECTOR_WIDGET_LABEL_KEYS = {
+    seed: "widget.seed",
+    clear_vram_between_segments: "widget.clearVram",
+    export_source_images: "widget.exportSourceImages",
 };
 
 function applyDirectorWidgetLabels(node) {
     for (const w of node.widgets || []) {
-        const label = DIRECTOR_WIDGET_LABELS[w.name];
-        if (label) w.label = label;
+        const key = DIRECTOR_WIDGET_LABEL_KEYS[w.name];
+        if (key) w.label = t(key);
     }
 }
 
@@ -918,6 +927,8 @@ class MiniMaxH3DirectorEditor {
         this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
         this.buildDOM();
         this.bindEvents();
+        this._unsubLocale = onLocaleChange(() => this.applyLocale());
+        this.applyLocale();
         this._directorMode = getDirectorMode(this.taskTypeWidget?.value);
         if (this._directorMode === "video") {
             this.restoreVideoFromTimeline();
@@ -1191,28 +1202,29 @@ class MiniMaxH3DirectorEditor {
         toolbarWrap.innerHTML = `
             <div class="bd-toolbar">
                 <div class="bd-actions">
-                    <button type="button" class="bd-btn bd-btn-primary hidden" data-a="r2v-add-group" title="添加一组参考素材（图片 / 音频 / 视频）">添加素材组</button>
-                    <button type="button" class="bd-btn bd-btn-primary" data-a="video">上传视频</button>
-                    <button type="button" class="bd-btn bd-btn-primary hidden" data-a="fl2v-add-shot" title="添加一组首尾帧（首帧必传，尾帧可选）">添加一组</button>
-                    <button type="button" class="bd-btn" data-a="video-append" title="上传并追加到时间轴末尾，作为独立片段">追加视频</button>
-                    <button type="button" class="bd-btn" data-a="split">+ 分割</button>
-                    <input type="number" class="bd-num" data-r="equal-n" min="2" max="64" value="2" title="均分段数">
-                    <button type="button" class="bd-btn" data-a="equal">均分</button>
-                    <button type="button" class="bd-btn" data-a="smart-split" title="使用 PySceneDetect 按分镜自动分割（需 pip install scenedetect）">智能分割</button>
-                    <button type="button" class="bd-btn" data-a="run-select-toggle" title="开启后只采样勾选的片段；未勾选段不进采样（全部导出时用缓存或源画面填充）。关闭时运行全部">选择运行</button>
-                    <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" title="勾选=全选，取消=全部不选；仍可在各片段上单独勾选">
+                    <button type="button" class="bd-btn bd-btn-primary hidden" data-a="r2v-add-group" data-i18n="toolbar.addRefGroup" data-i18n-title="tooltip.addRefGroup">添加素材组</button>
+                    <button type="button" class="bd-btn bd-btn-primary" data-a="video" data-i18n="toolbar.uploadVideo">上传视频</button>
+                    <button type="button" class="bd-btn bd-btn-primary hidden" data-a="fl2v-add-shot" data-i18n="toolbar.addShot" data-i18n-title="tooltip.addShot">添加一组</button>
+                    <button type="button" class="bd-btn" data-a="video-append" data-i18n="toolbar.appendVideo" data-i18n-title="tooltip.appendVideo">追加视频</button>
+                    <button type="button" class="bd-btn" data-a="split" data-i18n="toolbar.split">+ 分割</button>
+                    <input type="number" class="bd-num" data-r="equal-n" min="2" max="64" value="2" data-i18n-title="tooltip.equalSplitN">
+                    <button type="button" class="bd-btn" data-a="equal" data-i18n="toolbar.equalSplit">均分</button>
+                    <button type="button" class="bd-btn" data-a="smart-split" data-i18n="toolbar.smartSplit" data-i18n-title="tooltip.smartSplit">智能分割</button>
+                    <button type="button" class="bd-btn" data-a="run-select-toggle" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.runSelect">选择运行</button>
+                    <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" data-i18n-title="tooltip.runSelectAll">
                         <input type="checkbox" data-r="run-select-all-cb">
-                        <span>全选</span>
+                        <span data-i18n="toolbar.selectAll">全选</span>
                     </label>
-                    <button type="button" class="bd-btn bd-btn-danger" data-a="del" title="删除选中片段并裁剪视频，时间轴自动衔接">删除片段</button>
+                    <button type="button" class="bd-btn bd-btn-danger" data-a="del" data-i18n="toolbar.deleteSegment" data-i18n-title="tooltip.deleteSegment">删除片段</button>
                     <div class="bd-mode">
-                        <button type="button" data-a="mode-global" class="active">全局模式</button>
-                        <button type="button" data-a="mode-segment">分段模式</button>
+                        <button type="button" data-a="mode-global" class="active" data-i18n="toolbar.modeGlobal">全局模式</button>
+                        <button type="button" data-a="mode-segment" data-i18n="toolbar.modeSegment">分段模式</button>
                     </div>
                     <select class="bd-select" data-r="global-task" title="task_type"></select>
-                    <span class="bd-video-tag" data-r="video-name">未上传视频</span>
+                    <span class="bd-video-tag" data-r="video-name" data-i18n="toolbar.noVideo">未上传视频</span>
                 </div>
                 <div class="bd-right">
+                    <button type="button" class="bd-btn" data-a="lang-toggle" data-i18n="toolbar.langToggle" data-i18n-title="toolbar.langToggleTitle">EN</button>
                     <div class="bd-bounds" data-r="bounds">Start: 0.00 | End: -</div>
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
                 </div>
@@ -1220,6 +1232,7 @@ class MiniMaxH3DirectorEditor {
             <div class="bd-smart-split-msg hidden" data-r="smart-split-msg" role="status"></div>`;
         this.root.appendChild(toolbarWrap);
         this.smartSplitMsgEl = toolbarWrap.querySelector('[data-r="smart-split-msg"]');
+        this.langToggleBtn = toolbarWrap.querySelector('[data-a="lang-toggle"]');
 
         this.mainBody = document.createElement("div");
         this.mainBody.className = "bd-main";
@@ -1231,7 +1244,7 @@ class MiniMaxH3DirectorEditor {
         stage.innerHTML = `
             <video class="bd-stage-video hidden" data-r="stage-video" muted playsinline preload="auto"></video>
             <img class="bd-stage-img hidden" data-r="stage-img" alt="">
-            <div class="bd-stage-empty" data-r="stage-empty">上传视频后可在此预览播放</div>
+            <div class="bd-stage-empty" data-r="stage-empty" data-i18n="stage.empty">上传视频后可在此预览播放</div>
             <div class="bd-stage-badge hidden" data-r="stage-badge"></div>`;
         this.mainBody.appendChild(stage);
 
@@ -1240,12 +1253,12 @@ class MiniMaxH3DirectorEditor {
         controls.className = "bd-controls";
         controls.innerHTML = `
             <div class="bd-player">
-                <button type="button" class="bd-icon-btn" data-a="play" title="播放 / 暂停">▶</button>
-                <button type="button" class="bd-icon-btn" data-a="loop" title="循环播放：开启后预览播放到末尾会自动从头开始">⟳</button>
-                <button type="button" class="bd-icon-btn" data-a="frame-prev" title="上一帧 (←)">‹</button>
-                <button type="button" class="bd-icon-btn" data-a="frame-next" title="下一帧 (→)">›</button>
-                <span class="bd-frame-jump" title="输入帧号后回车定位（从 1 开始）">
-                    <span>帧</span>
+                <button type="button" class="bd-icon-btn" data-a="play" data-i18n-title="player.playPause">▶</button>
+                <button type="button" class="bd-icon-btn" data-a="loop" data-i18n-title="player.loopOn">⟳</button>
+                <button type="button" class="bd-icon-btn" data-a="frame-prev" data-i18n-title="player.framePrev">‹</button>
+                <button type="button" class="bd-icon-btn" data-a="frame-next" data-i18n-title="player.frameNext">›</button>
+                <span class="bd-frame-jump" data-i18n-title="player.frameJump">
+                    <span data-i18n="player.frame">帧</span>
                     <input type="number" class="bd-frame-input" data-r="frame-input" min="1" step="1" value="1">
                     <span>/</span>
                     <span class="bd-frame-total" data-r="frame-total">0</span>
@@ -1265,8 +1278,8 @@ class MiniMaxH3DirectorEditor {
         splitEditBar.className = "bd-split-edit-bar hidden";
         splitEditBar.setAttribute("data-r", "split-edit-bar");
         splitEditBar.innerHTML = `
-            <span class="bd-split-edit-hint" data-r="split-edit-hint">已选中分割点</span>
-            <button type="button" class="bd-btn bd-btn-del-split" data-a="del-split" title="删除选中分割点（合并相邻两段）">删除分割点</button>`;
+            <span class="bd-split-edit-hint" data-r="split-edit-hint" data-i18n="split.selectedHint">已选中分割点</span>
+            <button type="button" class="bd-btn bd-btn-del-split" data-a="del-split" data-i18n="toolbar.deleteSplitPoint" data-i18n-title="tooltip.deleteSplitPoint">删除分割点</button>`;
         this.mainBody.appendChild(splitEditBar);
         this.splitEditBarEl = splitEditBar;
         this.splitEditHintEl = splitEditBar.querySelector('[data-r="split-edit-hint"]');
@@ -1282,57 +1295,57 @@ class MiniMaxH3DirectorEditor {
         const outputBar = document.createElement("div");
         outputBar.className = "bd-output";
         outputBar.innerHTML = `
-            <span class="bd-fl2v-total-wrap hidden" data-r="fl2v-total-wrap" title="总时长 = 各组时长之和（只读）">
-                <label>总时长（秒）</label>
-                <input type="number" class="bd-num" data-r="fl2v-total" min="1" max="99999" step="0.1" value="5" style="width:64px" disabled title="总时长 = 各组之和，请在镜卡片或时间轴上改各镜时长">
+            <span class="bd-fl2v-total-wrap hidden" data-r="fl2v-total-wrap" data-i18n-title="tooltip.fl2vTotalDuration">
+                <label data-i18n="output.totalDurationSec">总时长（秒）</label>
+                <input type="number" class="bd-num" data-r="fl2v-total" min="1" max="99999" step="0.1" value="5" style="width:64px" disabled data-i18n-title="tooltip.fl2vTotalInput">
             </span>
-            <label>输出分辨率</label>
-            <select class="bd-select" data-r="out-aspect" title="宽高比（同官方 ResolutionSelector）；选「自定义」可直接设宽高" style="max-width:200px">
-                ${RESOLUTION_ASPECTS.map(([label]) => `<option value="${label}"${label === DEFAULT_ASPECT_RATIO ? " selected" : ""}>${label}</option>`).join("")}
-                <option value="${CUSTOM_ASPECT_RATIO}">${CUSTOM_ASPECT_RATIO}</option>
+            <label data-i18n="output.resolution">输出分辨率</label>
+            <select class="bd-select" data-r="out-aspect" data-i18n-title="tooltip.aspectRatio" style="max-width:200px">
+                ${RESOLUTION_ASPECTS.map(([label]) => `<option value="${label}"${label === DEFAULT_ASPECT_RATIO ? " selected" : ""}>${aspectDisplayLabel(label)}</option>`).join("")}
+                <option value="${CUSTOM_ASPECT_RATIO}">${aspectDisplayLabel(CUSTOM_ASPECT_RATIO)}</option>
             </select>
-            <span class="bd-out-mp-wrap" data-r="out-mp-wrap" title="百万像素 · 同 ResolutionSelector.megapixels；1.0 MP ≈ 1024×1024">
-                <label>百万像素</label>
+            <span class="bd-out-mp-wrap" data-r="out-mp-wrap" data-i18n-title="tooltip.megapixels">
+                <label data-i18n="output.megapixels">百万像素</label>
                 <input type="number" class="bd-num" data-r="out-mp" min="0.1" max="16" step="0.1" value="${DEFAULT_MEGAPIXELS}" style="width:56px">
             </span>
             <span class="bd-out-long hidden" data-r="out-long-wrap">
-                <label>最长边</label>
-                <input type="number" class="bd-num" data-r="out-long" min="32" max="8192" step="1" value="864" style="width:56px" title="缩放上限（可填 848 等任意值）；实际宽高再对齐到 32">
+                <label data-i18n="output.longEdge">最长边</label>
+                <input type="number" class="bd-num" data-r="out-long" min="32" max="8192" step="1" value="864" style="width:56px" data-i18n-title="tooltip.longEdge">
             </span>
-            <span class="bd-out-fixed hidden" data-r="out-fixed-wrap" title="自定义宽高（对齐到 32 的倍数）">
-                <label>宽</label>
+            <span class="bd-out-fixed hidden" data-r="out-fixed-wrap" data-i18n-title="tooltip.customWH">
+                <label data-i18n="output.width">宽</label>
                 <input type="number" class="bd-num" data-r="out-w" min="32" max="8192" step="32" value="864" style="width:56px">
-                <label>高</label>
+                <label data-i18n="output.height">高</label>
                 <input type="number" class="bd-num" data-r="out-h" min="32" max="8192" step="32" value="480" style="width:56px">
             </span>
-            <select class="bd-select hidden" data-r="out-mode" title="输出缩放模式（视频编辑用）">
-                <option value="long_edge">最长边缩放</option>
-                <option value="fixed">固定宽高</option>
+            <select class="bd-select hidden" data-r="out-mode" data-i18n-title="tooltip.outputMode">
+                <option value="long_edge" data-i18n="output.mode.longEdge">最长边缩放</option>
+                <option value="fixed" data-i18n="output.mode.fixed">固定宽高</option>
             </select>
-            <label title="上传后默认跟源视频 FPS；修改时会保持真实时长不变并重算帧数（例：30→24fps 时 275 帧→约 220 帧，时长仍约 9.2s）">FPS</label>
-            <input type="number" class="bd-num" data-r="timeline-fps" min="1" max="240" step="0.01" value="24" style="width:64px" title="时间线/导出 FPS">
-            <span class="bd-out-audio-wrap hidden" data-r="out-audio-wrap" title="v2v / rv2v 声音：生成模型音频、沿用源视频原声，或静音">
-                <label>声音</label>
+            <label data-i18n-title="tooltip.fps">FPS</label>
+            <input type="number" class="bd-num" data-r="timeline-fps" min="1" max="240" step="0.01" value="24" style="width:64px" data-i18n-title="tooltip.timelineFps">
+            <span class="bd-out-audio-wrap hidden" data-r="out-audio-wrap" data-i18n-title="tooltip.audioMode">
+                <label data-i18n="output.audio.label">声音</label>
                 <select class="bd-select" data-r="out-audio-mode" style="max-width:120px">
-                    <option value="generate">生成声音</option>
-                    <option value="source">使用原声</option>
-                    <option value="mute">静音</option>
+                    <option value="generate" data-i18n="output.audio.generate">生成声音</option>
+                    <option value="source" data-i18n="output.audio.source">使用原声</option>
+                    <option value="mute" data-i18n="output.audio.mute">静音</option>
                 </select>
             </span>
             <span class="bd-meta" data-r="out-preview">—</span>
             <span class="bd-meta hidden" data-r="out-hint"></span>
-            <label title="全部导出：合并为一个视频；分段导出：每段时间轴片段单独输出（images 输出为列表，Video Combine 会生成多个 MP4）">导出方式</label>
-            <select class="bd-select" data-r="out-export-mode" title="输出方式">
-                <option value="all">全部导出</option>
-                <option value="segments">分段导出</option>
+            <label data-i18n="output.exportMode.label" data-i18n-title="tooltip.exportMode">导出方式</label>
+            <select class="bd-select" data-r="out-export-mode" data-i18n-title="tooltip.exportMode">
+                <option value="all" data-i18n="output.exportMode.all">全部导出</option>
+                <option value="segments" data-i18n="output.exportMode.segments">分段导出</option>
             </select>
             <span class="hidden" data-r="out-max-frames-wrap" hidden aria-hidden="true">
-                <label>最大帧数</label>
+                <label data-i18n="output.maxFrames">最大帧数</label>
                 <input type="number" class="bd-num" data-r="out-max-frames" min="0" max="999999" step="1" value="0" style="width:64px">
             </span>
             <span class="bd-continuous-ref hidden" data-r="segment-continuity-wrap" hidden aria-hidden="true" title="">
-                <label><input type="checkbox" data-r="segment-continuity-cb">段间引导</label>
-                <span class="bd-meta">参考帧数</span>
+                <label><input type="checkbox" data-r="segment-continuity-cb"><span data-i18n="output.segmentContinuity">段间引导</span></label>
+                <span class="bd-meta" data-i18n="output.continuityOverlap">参考帧数</span>
                 <input type="number" class="bd-num" data-r="segment-continuity-overlap" min="1" max="81" step="4" value="9" style="width:48px">
             </span>`;
         this.mainBody.appendChild(outputBar);
@@ -1341,36 +1354,36 @@ class MiniMaxH3DirectorEditor {
         bottom.className = "bd-split";
         bottom.innerHTML = `
             <div class="bd-panel" data-r="global-panel">
-                <b>全局提示词 & 参考图 (图片1–9)</b>
+                <b data-r="global-panel-title" data-i18n="panel.globalPromptAndRefs">全局提示词 & 参考图 (图片1–9)</b>
                 <div class="bd-prompt-layout">
                     <div class="bd-prompt-col">
-                        <span class="bd-label">提示词</span>
-                        <textarea class="bd-prompt" data-r="global-prompt" placeholder="提示词（MiniMax H3 无反向提示词；最多约 7000 字符）— 输入 @ 选择参考图/音频"></textarea>
+                        <span class="bd-label" data-i18n="panel.prompt">提示词</span>
+                        <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
                         <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
                     </div>
                     <div class="bd-refs-col" data-r="global-refs-col">
                         <div data-r="global-refs-images-wrap">
-                            <span class="bd-label" data-r="global-refs-label">参考图 (图片1–9)</span>
+                            <span class="bd-label" data-r="global-refs-label" data-i18n="panel.refImages">参考图 (图片1–9)</span>
                             <div class="bd-refs" data-r="global-refs"></div>
                         </div>
                         <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
-                            <span class="bd-label">参考音频 (音频1–3)</span>
+                            <span class="bd-label" data-i18n="panel.refAudios">参考音频 (音频1–3)</span>
                             <div class="bd-ref-audios" data-r="global-ref-audios"></div>
                         </div>
                         <div class="bd-ref-video-col hidden" data-r="global-ref-video-col">
-                            <span class="bd-label">参考视频（植入内容）</span>
-                            <div class="bd-gen-src" data-r="global-ref-video" title="上传要植入的参考视频">点击上传参考视频</div>
+                            <span class="bd-label" data-i18n="panel.refVideo">参考视频（植入内容）</span>
+                            <div class="bd-gen-src" data-r="global-ref-video" data-i18n="panel.uploadRefVideo" data-i18n-title="tooltip.uploadRefVideo">点击上传参考视频</div>
                             <span class="bd-meta bd-ref-video-name" data-r="global-ref-video-name"></span>
-                            <label class="bd-continuous-ref hidden" data-r="continuous-ref-wrap" title="勾选后，各片段的参考视频从与源片段时间轴相同的帧位置开始（如第2段从第30帧起，参考视频也从第30帧起）；未勾选时每段均从参考视频第1帧开始">
+                            <label class="bd-continuous-ref hidden" data-r="continuous-ref-wrap" data-i18n-title="tooltip.continuousRef">
                                 <input type="checkbox" data-r="continuous-ref-cb">
-                                <span>连续参考</span>
+                                <span data-i18n="panel.continuousRef">连续参考</span>
                             </label>
                         </div>
-                        <div class="bd-gen-src hidden" data-r="gen-global-img" title="上传源图片">点击上传源图片</div>
+                        <div class="bd-gen-src hidden" data-r="gen-global-img" data-i18n="panel.uploadSourceImage" data-i18n-title="tooltip.uploadSourceImage">点击上传源图片</div>
                     </div>
                 </div>
                 <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
-                    <span class="bd-label">默认片段帧数</span>
+                    <span class="bd-label" data-i18n="panel.defaultSegmentFrames">默认片段帧数</span>
                     <input type="number" class="bd-num" data-r="gen-default-fc" min="1" max="${MAX_GEN_FRAMES}" value="124" style="width:72px">
                 </div>
             </div>
@@ -1379,29 +1392,29 @@ class MiniMaxH3DirectorEditor {
                 <div class="bd-meta" data-r="seg-info"></div>
                 <div class="bd-prompt-layout">
                     <div class="bd-prompt-col">
-                        <span class="bd-label">提示词</span>
-                        <textarea class="bd-prompt" data-r="seg-prompt" placeholder="该片段提示词（MiniMax H3 无反向提示词）— 输入 @ 选择参考图/音频"></textarea>
+                        <span class="bd-label" data-i18n="panel.prompt">提示词</span>
+                        <textarea class="bd-prompt" data-r="seg-prompt" data-i18n-placeholder="placeholder.segmentPrompt" placeholder=""></textarea>
                         <textarea class="bd-prompt bd-prompt-negative hidden" data-r="seg-negative" hidden aria-hidden="true"></textarea>
                     </div>
                     <div class="bd-refs-col" data-r="seg-refs-col">
                         <div data-r="seg-refs-images-wrap">
-                            <span class="bd-label" data-r="seg-refs-label">片段参考图 (图片1–9)</span>
+                            <span class="bd-label" data-r="seg-refs-label" data-i18n="panel.segmentRefImages">片段参考图 (图片1–9)</span>
                             <div class="bd-refs" data-r="seg-refs"></div>
                         </div>
                         <div class="bd-ref-audios-wrap hidden" data-r="seg-ref-audios-wrap">
-                            <span class="bd-label">片段参考音频 (音频1–3)</span>
+                            <span class="bd-label" data-i18n="panel.segmentRefAudios">片段参考音频 (音频1–3)</span>
                             <div class="bd-ref-audios" data-r="seg-ref-audios"></div>
                         </div>
                         <div class="bd-ref-video-col hidden" data-r="seg-ref-video-col">
-                            <span class="bd-label">片段参考视频（植入内容）</span>
-                            <div class="bd-gen-src" data-r="seg-ref-video" title="上传要植入的参考视频">点击上传参考视频</div>
+                            <span class="bd-label" data-i18n="panel.segmentRefVideo">片段参考视频（植入内容）</span>
+                            <div class="bd-gen-src" data-r="seg-ref-video" data-i18n="panel.uploadRefVideo" data-i18n-title="tooltip.uploadRefVideo">点击上传参考视频</div>
                             <span class="bd-meta bd-ref-video-name" data-r="seg-ref-video-name"></span>
                         </div>
-                        <div class="bd-gen-src hidden" data-r="gen-seg-img" title="上传片段源图片">点击上传源图片</div>
+                        <div class="bd-gen-src hidden" data-r="gen-seg-img" data-i18n="panel.uploadSegmentSourceImage" data-i18n-title="tooltip.uploadSourceImage">点击上传源图片</div>
                     </div>
                 </div>
                 <div class="bd-gen-fc-row hidden" data-r="gen-seg-fc-row">
-                    <span class="bd-label">片段帧数</span>
+                    <span class="bd-label" data-i18n="panel.segmentFrames">片段帧数</span>
                     <input type="number" class="bd-num" data-r="gen-seg-fc" min="1" max="${MAX_GEN_FRAMES}" value="124" style="width:72px">
                 </div>
             </div>`;
@@ -1426,14 +1439,14 @@ class MiniMaxH3DirectorEditor {
         runStatus.className = "bd-run-status idle";
         runStatus.dataset.r = "run-status";
         runStatus.innerHTML = `
-            <div class="bd-run-title" data-r="run-title">运行状态：待命</div>
-            <div class="bd-run-detail" data-r="run-detail">队列执行时将显示当前片段与阶段进度</div>
+            <div class="bd-run-title" data-r="run-title" data-i18n="run.titleIdle">运行状态：待命</div>
+            <div class="bd-run-detail" data-r="run-detail" data-i18n="run.detailIdle">队列执行时将显示当前片段与阶段进度</div>
             <div class="bd-run-select-bar hidden" data-r="run-select-bar">
-                <span data-r="run-select-summary">将运行全部片段</span>
+                <span data-r="run-select-summary" data-i18n="run.summaryAllSegments">将运行全部片段</span>
             </div>
             <div class="bd-run-bars">
-                <div class="bd-run-bar" title="整体进度"><div class="bd-run-bar-fill" data-r="run-overall" style="width:0%"></div></div>
-                <div class="bd-run-bar bd-run-bar-sub" title="当前阶段"><div class="bd-run-bar-fill" data-r="run-phase" style="width:0%"></div></div>
+                <div class="bd-run-bar" data-i18n-title="run.bar.overall"><div class="bd-run-bar-fill" data-r="run-overall" style="width:0%"></div></div>
+                <div class="bd-run-bar bd-run-bar-sub" data-i18n-title="run.bar.phase"><div class="bd-run-bar-fill" data-r="run-phase" style="width:0%"></div></div>
             </div>`;
         this.root.appendChild(runStatus);
 
@@ -1575,6 +1588,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
+        bind('[data-a="lang-toggle"]', () => toggleLocale());
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="frame-prev"]', () => this.stepFrame(-1));
@@ -1818,6 +1832,8 @@ class MiniMaxH3DirectorEditor {
         cancelAnimationFrame(this._resizeRaf);
         cancelAnimationFrame(this._playRaf);
         this._resizeObserver?.disconnect();
+        this._unsubLocale?.();
+        this._unsubLocale = null;
         this._closeBdModal();
         this._previewVideo?.remove();
         this._previewVideo = null;
@@ -2061,22 +2077,22 @@ class MiniMaxH3DirectorEditor {
         };
         syncAllCb(this.runSelectAllCb);
         syncAllCb(this.batchRunSelectAllCb);
-        const label = this.isImageBatch() ? "组" : "段";
+        const label = t(this.isImageBatch() ? "unit.group" : "unit.segment");
         if (!this.runSelectSummary) return;
         if (!count) {
-            this.runSelectSummary.textContent = `未勾选任何${label}（无法运行）`;
+            this.runSelectSummary.textContent = t("runSelect.noneChecked", { unit: label });
             this.runSelectSummary.style.color = "#f88";
         } else if (count >= n) {
-            this.runSelectSummary.textContent = `将运行全部 ${n} ${label}`;
+            this.runSelectSummary.textContent = t("runSelect.all", { n, unit: label });
             this.runSelectSummary.style.color = "#aaa";
         } else {
             const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
             const exportHint = this.timeline.output?.exportMode === "segments"
-                ? "· 仅导出勾选段"
-                : "· 未勾选段用缓存/源画面填充，不采样";
+                ? t("runSelect.exportOnlyChecked")
+                : t("runSelect.fillUnchecked");
             this.runSelectSummary.textContent = count === 1
-                ? `将采样 1 ${label}（#${nums}）${exportHint}`
-                : `将采样 ${count} ${label}（#${nums}）${exportHint}`;
+                ? t("runSelect.sampleOne", { unit: label, nums, hint: exportHint })
+                : t("runSelect.sampleMany", { count, unit: label, nums, hint: exportHint });
             this.runSelectSummary.style.color = "#4fff8f";
         }
     }
@@ -2343,15 +2359,15 @@ class MiniMaxH3DirectorEditor {
         this.globalRefAudiosWrap?.classList.toggle("hidden", !showGlobalRefAudios);
         this.globalRefVideoCol?.classList.toggle("hidden", !showGlobalRefVideo);
         if (this.globalPanelTitle) {
-            if (showGlobalRefVideo) {
-                this.globalPanelTitle.textContent = "全局提示词 & 参考视频";
-            } else if (showGlobalRefs || showGlobalRefAudios) {
-                this.globalPanelTitle.textContent = showGlobalRefAudios
-                    ? "全局提示词 & 参考素材 (图片 / 音频)"
-                    : "全局提示词 & 参考图 (图片1–9)";
-            } else {
-                this.globalPanelTitle.textContent = "全局提示词";
+            let titleKey = "panel.globalPromptOnly";
+            if (showGlobalRefVideo) titleKey = "panel.globalPromptAndRefVideo";
+            else if (showGlobalRefs || showGlobalRefAudios) {
+                titleKey = showGlobalRefAudios
+                    ? "panel.globalPromptAndRefsMedia"
+                    : "panel.globalPromptAndRefs";
             }
+            this.globalPanelTitle.textContent = t(titleKey);
+            this.globalPanelTitle.setAttribute("data-i18n", titleKey);
         }
 
         const segKey = resolveTaskKey(
@@ -2892,10 +2908,13 @@ class MiniMaxH3DirectorEditor {
             const total = this.getTotalFrames();
             const withEnd = shots.filter((s) => s.endImage?.imageFile).length;
             const withStart = shots.filter((s) => s.startImage?.imageFile).length;
+            const sec = getFl2vTotalDurationSec(this);
             if (!n) {
-                this.videoNameEl.textContent = `未添加组 · ${getFl2vTotalDurationSec(this)}s (${total}f)`;
+                this.videoNameEl.textContent = t("videoName.fl2vEmpty", { sec, frames: total });
             } else {
-                this.videoNameEl.textContent = `${n} 组 · ${withStart} 首帧 · ${withEnd} 尾帧 · ${getFl2vTotalDurationSec(this)}s (${total}f)`;
+                this.videoNameEl.textContent = t("videoName.fl2vSummary", {
+                    n, start: withStart, end: withEnd, sec, frames: total,
+                });
             }
             return;
         }
@@ -2910,10 +2929,15 @@ class MiniMaxH3DirectorEditor {
                     return s + (Number.isFinite(v) ? v : 0);
                 }, 0) * 100) / 100;
                 this.videoNameEl.textContent = total
-                    ? `${key} · ${n} 组提示词 · ${sec || framesToDurationSec(total, this.getFrameRate())}s (${total}f)`
-                    : `${key} · ${n} 组提示词 · 视频输出`;
+                    ? t("videoName.batchVideo", {
+                        key,
+                        n,
+                        sec: sec || framesToDurationSec(total, this.getFrameRate()),
+                        frames: total,
+                    })
+                    : t("videoName.batchVideoEmpty", { key, n });
             } else {
-                this.videoNameEl.textContent = `${key} · ${n} 组提示词 · 单帧输出`;
+                this.videoNameEl.textContent = t("videoName.batchImage", { key, n });
             }
             return;
         }
@@ -2921,16 +2945,20 @@ class MiniMaxH3DirectorEditor {
             const total = this.getTotalFrames();
             const key = this.getTaskKey();
             if (this.isGenBlank()) {
-                this.videoNameEl.textContent = total ? `空白画布 · ${total}f` : "空白画布 · 请设置片段帧数";
+                this.videoNameEl.textContent = total
+                    ? t("videoName.blankCanvas", { frames: total })
+                    : t("videoName.blankCanvasNeedFrames");
             } else {
-                this.videoNameEl.textContent = total ? `${key} · ${total}f` : `${key} · 请上传源图片`;
+                this.videoNameEl.textContent = total
+                    ? `${key} · ${total}f`
+                    : t("videoName.genNeedSource", { key });
             }
             return;
         }
         const clips = this.getVideoClips();
         const total = this.getTotalFrames();
         if (!clips.length || !total) {
-            this.videoNameEl.textContent = "未上传视频";
+            this.videoNameEl.textContent = t("toolbar.noVideo");
             return;
         }
         if (clips.length === 1) {
@@ -2938,15 +2966,20 @@ class MiniMaxH3DirectorEditor {
             const dim = c.storageWidth && c.storageHeight
                 ? ` · ${c.storageWidth}×${c.storageHeight}`
                 : (this._storageWidth && this._storageHeight ? ` · ${this._storageWidth}×${this._storageHeight}` : "");
-            const nativeHint = c.nativeFps > 0 ? ` · 源${formatProbeFps(c.nativeFps)}fps` : "";
+            const nativeHint = c.nativeFps > 0 ? t("canvas.nativeFps", { fps: formatProbeFps(c.nativeFps) }) : "";
             const tlFps = this.getFrameRate();
             const dur = this.getTimelineDurationSec().toFixed(2);
-            this.videoNameEl.textContent = `${c.fileName || c.videoFile} (${total}f · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`;
+            const name = c.fileName || c.videoFile;
+            this.videoNameEl.textContent = getLocale() === "en"
+                ? `${name} (${total}f · timeline ${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`
+                : `${name} (${total}f · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`;
             return;
         }
         const tlFps = this.getFrameRate();
         const dur = this.getTimelineDurationSec().toFixed(2);
-        this.videoNameEl.textContent = `${clips.length} 段视频 · 共 ${total} 帧 · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s`;
+        this.videoNameEl.textContent = t("videoName.multiClip", {
+            n: clips.length, total, fps: formatProbeFps(tlFps), dur,
+        });
     }
 
     getFrameMapEntry(logicalFrame) {
@@ -3435,13 +3468,44 @@ class MiniMaxH3DirectorEditor {
     populateTaskSelect(el, selected) {
         if (!el) return;
         const opts = this.taskTypeWidget?.options?.values || [];
+        const prev = selected || el.value;
         el.innerHTML = "";
         for (const v of opts) {
             const o = document.createElement("option");
-            o.value = v; o.textContent = v;
+            o.value = v;
+            const key = resolveTaskKey(v);
+            o.textContent = taskDisplayLabel(key) || v;
             el.appendChild(o);
         }
-        if (selected) el.value = selected;
+        if (prev) el.value = prev;
+    }
+
+    refreshAspectSelectLabels() {
+        if (!this.outAspect) return;
+        const cur = this.outAspect.value;
+        for (const opt of this.outAspect.options || []) {
+            opt.textContent = aspectDisplayLabel(opt.value);
+        }
+        if (cur) this.outAspect.value = cur;
+    }
+
+    applyLocale() {
+        applyI18nDom(this.root);
+        applyDirectorWidgetLabels(this.node);
+        this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value || this.globalTask?.value);
+        this.refreshAspectSelectLabels();
+        // Re-apply dynamic UI strings that overwrite data-i18n nodes.
+        this.updateVideoNameLabel?.();
+        this.updateRunSelectUI?.();
+        this.updateOutputPreview?.();
+        this.updateSelectionUI?.();
+        this.refreshLoopButtonTitle?.();
+        updateFl2vDetailUI?.(this);
+        updateFl2vToolbarBtns?.(this);
+        updateR2vToolbarBtns?.(this);
+        this.renderImageBatchGroups?.();
+        this.scheduleRender?.();
+        this.node?.setDirtyCanvas?.(true, true);
     }
 
     getI2iSourceDimensions() {
@@ -3662,7 +3726,7 @@ class MiniMaxH3DirectorEditor {
                 const resolved = resolveOutputDimensions(src.width, src.height, out, {
                     refMaxSize: this.refMaxWidget?.value,
                 });
-                const note = src.width > 0 ? "" : " · 上传源图后按最长边计算";
+                const note = src.width > 0 ? "" : t("output.preview.needSourceForLongEdge");
                 this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${note}${this._exportPreviewSuffix()}`;
             } else {
                 const w = snapDim(+(out.width ?? this.outW?.value ?? 864));
@@ -3676,7 +3740,7 @@ class MiniMaxH3DirectorEditor {
             if (isCustomAspectRatio(out.aspectRatio)) {
                 const w = snapResolutionDim(out.width ?? this.outW?.value ?? 864, out.multiple ?? MINIMAX_CANVAS_MULTIPLE);
                 const h = snapResolutionDim(out.height ?? this.outH?.value ?? 480, out.multiple ?? MINIMAX_CANVAS_MULTIPLE);
-                this.outPreview.textContent = `→ ${w}×${h} · 自定义${this._exportPreviewSuffix()}`;
+                this.outPreview.textContent = t("output.preview.custom", { w, h }) + this._exportPreviewSuffix();
                 return;
             }
             const resolved = resolutionFromSelector(
@@ -3707,15 +3771,19 @@ class MiniMaxH3DirectorEditor {
 
     _exportPreviewSuffix() {
         const cap = this.getMaxExportFrames();
-        const exportMode = this.timeline.output?.exportMode === "segments" ? " · 分段导出" : "";
+        const exportMode = this.timeline.output?.exportMode === "segments"
+            ? t("output.preview.segmentExport")
+            : "";
         const dur = this.getTimelineDurationSec().toFixed(2);
         const fps = formatProbeFps(this.getFrameRate());
-        const timeHint = ` · ${dur}s @ ${fps}fps`;
+        const timeHint = t("output.preview.timeFps", { dur, fps });
         if (cap <= 0) return `${timeHint}${exportMode}`;
         const total = this.getTotalFrames();
         const exportTotal = this.getExportFrameTotal();
-        if (exportTotal >= total) return `${timeHint} · 导出 ${exportTotal} 帧${exportMode}`;
-        return `${timeHint} · 导出 ${exportTotal}/${total} 帧${exportMode}`;
+        if (exportTotal >= total) {
+            return `${timeHint}${t("output.preview.exportFrames", { n: exportTotal })}${exportMode}`;
+        }
+        return `${timeHint}${t("output.preview.exportFramesPartial", { n: exportTotal, total })}${exportMode}`;
     }
 
     onOutputField(key, value) {
@@ -5636,7 +5704,7 @@ class MiniMaxH3DirectorEditor {
         }
 
         if (!total) {
-            this.videoNameEl.textContent = "未上传视频";
+            this.videoNameEl.textContent = t("toolbar.noVideo");
             this.timeline.videoClips = [];
             this.timeline.video = {
                 fileName: "",
@@ -5821,7 +5889,7 @@ class MiniMaxH3DirectorEditor {
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
             ctx.fillText(
-                this.isFl2vMode() ? "点击「添加一组」" : "点击「上传视频」",
+                this.isFl2vMode() ? t("canvas.clickAddShot") : t("canvas.clickUploadVideo"),
                 startX + pxWidth / 2,
                 y0 + h / 2,
             );
@@ -6052,7 +6120,7 @@ class MiniMaxH3DirectorEditor {
             this.ctx.font = "10px sans-serif";
             this.ctx.textAlign = "left";
             if (width - ox > 64) {
-                this.ctx.fillText("超出·不采样", ox + 6, RULER_H - 3);
+                this.ctx.fillText(t("canvas.beyondSampling"), ox + 6, RULER_H - 3);
             }
             this.ctx.restore();
         }
@@ -6091,7 +6159,7 @@ class MiniMaxH3DirectorEditor {
             this.ctx.textAlign = "center";
             this.ctx.textBaseline = "middle";
             this.ctx.fillText(
-                this.isR2vBatch() ? "点击「添加素材组」" : "点击「添加一组」",
+                this.isR2vBatch() ? t("canvas.clickAddRefGroup") : t("canvas.clickAddShot"),
                 width / 2,
                 TRACK_Y + TRACK_H / 2,
             );
@@ -6411,7 +6479,7 @@ class MiniMaxH3DirectorEditor {
         if (!seg) return;
         const fps = this.getFrameRate();
         const segKey = resolveTaskKey(seg.taskType || this.timeline.global?.taskType || this.getTaskKey());
-        this.segLabel.textContent = `片段 ${this.selectedIndex + 1}`;
+        this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
         let info;
         if (this.isGenMode()) {
             const fc = seg.frameCount ?? seg.length;
@@ -6747,10 +6815,15 @@ class MiniMaxH3DirectorEditor {
     toggleLoop() {
         this.isLooping = !this.isLooping;
         const btn = this.root.querySelector('[data-a="loop"]');
-        btn.classList.toggle("active", this.isLooping);
-        btn.title = this.isLooping
-            ? "循环播放：已开启（播放到末尾后从头开始）"
-            : "循环播放：已关闭（播放到末尾后停止）";
+        btn?.classList.toggle("active", this.isLooping);
+        this.refreshLoopButtonTitle();
+    }
+
+    refreshLoopButtonTitle() {
+        const btn = this.root?.querySelector('[data-a="loop"]');
+        if (!btn) return;
+        btn.title = this.isLooping ? t("player.loopEnabled") : t("player.loopOff");
+        btn.removeAttribute("data-i18n-title");
     }
 
     setRunProgress(detail) {
@@ -6761,7 +6834,7 @@ class MiniMaxH3DirectorEditor {
         const timelineSeg = detail.timeline_segment ?? runSeg;
         const partialRun = !!detail.partial_run
             || (this.isRunSelectEnabled?.() && runTotal < timelineTotal);
-        const phaseLabel = detail.phase_label || detail.phase || "运行中";
+        const phaseLabel = detail.phase_label || detail.phase || t("run.phase.default");
         const overallPct = detail.overall_max > 0
             ? Math.round((100 * detail.overall_value) / detail.overall_max)
             : 0;
@@ -6772,16 +6845,16 @@ class MiniMaxH3DirectorEditor {
 
         if (detail.phase === "finish") {
             this.runStatusEl.className = "bd-run-status done";
-            this.runTitleEl.textContent = "运行状态：全部完成";
+            this.runTitleEl.textContent = t("run.titleDone");
             this.runDetailEl.textContent = runTotal
                 ? (this.isImageBatch()
                     ? (isVideoBatchTask(this.getTaskKey())
-                        ? `共生成 ${runTotal} 组视频`
-                        : `共生成 ${runTotal} 张图片`)
+                        ? t("run.detailDoneVideos", { n: runTotal })
+                        : t("run.detailDoneImages", { n: runTotal }))
                     : (partialRun
-                        ? `共处理 ${runTotal} 个选中片段`
-                        : `共处理 ${runTotal} 个片段`))
-                : "处理完成";
+                        ? t("run.detailDoneSegmentsPartial", { n: runTotal })
+                        : t("run.detailDoneSegments", { n: runTotal })))
+                : t("run.detailDoneGeneric");
             this.runOverallEl.style.width = "100%";
             this.runPhaseEl.style.width = "100%";
             this._runHighlightSeg = -1;
@@ -6798,13 +6871,13 @@ class MiniMaxH3DirectorEditor {
         this._runHighlightSeg = timelineSeg - 1;
         let title;
         if (detail.phase === "plan") {
-            title = runTotal > 1 ? `共 ${runTotal} 段 · ${phaseLabel}` : phaseLabel;
+            title = runTotal > 1 ? t("run.titlePlanning", { n: runTotal, phase: phaseLabel }) : phaseLabel;
         } else if (this.isImageBatch()) {
-            title = `第 ${runSeg}/${runTotal} 组 · ${phaseLabel}`;
+            title = t("run.titleBatchGroup", { i: runSeg, n: runTotal, phase: phaseLabel });
         } else if (partialRun) {
-            title = `段 #${timelineSeg}（${runSeg}/${runTotal}）· ${phaseLabel}`;
+            title = t("run.titleSegmentPartial", { timeline: timelineSeg, i: runSeg, n: runTotal, phase: phaseLabel });
         } else {
-            title = `段 ${runSeg}/${runTotal} · ${phaseLabel}`;
+            title = t("run.titleSegment", { i: runSeg, n: runTotal, phase: phaseLabel });
         }
         if (phasePct > 0 && detail.phase !== "plan") {
             title += ` · ${phasePct}%`;
@@ -6813,12 +6886,14 @@ class MiniMaxH3DirectorEditor {
         const parts = [];
         if (detail.frames_label) parts.push(detail.frames_label);
         if (detail.task_key) parts.push(detail.task_key);
-        parts.push(`整体 ${overallPct}%`);
+        parts.push(t("run.detailOverall", { pct: overallPct }));
         if (runTotal > 1) {
-            parts.push(this.isImageBatch() ? `还剩 ${remain} 组` : `还剩 ${remain} 段`);
+            parts.push(this.isImageBatch()
+                ? t("run.detailRemainingGroups", { n: remain })
+                : t("run.detailRemainingSegments", { n: remain }));
         }
         if (partialRun && timelineTotal > runTotal) {
-            parts.push(`时间轴共 ${timelineTotal} 段`);
+            parts.push(t("run.detailTimelineTotal", { n: timelineTotal }));
         }
         this.runDetailEl.textContent = parts.join(" · ");
         this.runOverallEl.style.width = `${overallPct}%`;
@@ -6833,8 +6908,8 @@ class MiniMaxH3DirectorEditor {
     clearRunProgress(title, detail) {
         if (!this.runStatusEl) return;
         this.runStatusEl.className = "bd-run-status idle";
-        this.runTitleEl.textContent = title || "运行状态：待命";
-        this.runDetailEl.textContent = detail || "队列执行时将显示当前片段与阶段进度";
+        this.runTitleEl.textContent = title || t("run.titleIdle");
+        this.runDetailEl.textContent = detail || t("run.detailIdle");
         this.runOverallEl.style.width = "0%";
         this.runPhaseEl.style.width = "0%";
         this._runHighlightSeg = -1;
@@ -6846,8 +6921,8 @@ class MiniMaxH3DirectorEditor {
     setRunError(message) {
         if (!this.runStatusEl) return;
         this.runStatusEl.className = "bd-run-status error";
-        this.runTitleEl.textContent = "运行状态：出错";
-        this.runDetailEl.textContent = message || "执行中断，请查看终端日志";
+        this.runTitleEl.textContent = t("run.titleError");
+        this.runDetailEl.textContent = message || t("run.detailError");
         if (this.runOverallEl) this.runOverallEl.style.width = "0%";
         if (this.runPhaseEl) this.runPhaseEl.style.width = "0%";
         this._runHighlightSeg = -1;

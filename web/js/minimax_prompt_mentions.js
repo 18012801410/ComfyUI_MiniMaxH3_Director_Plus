@@ -9,6 +9,7 @@ import {
     refVideoLabel,
     refVideoPromptTag,
 } from "./minimax_gen_timeline.js";
+import { t } from "./minimax_i18n.js";
 
 const MENTION_STYLES = `
 .bd-mention-menu{position:fixed;z-index:10050;min-width:210px;max-width:300px;max-height:240px;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
@@ -142,13 +143,13 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         m.innerHTML = "";
         const title = document.createElement("div");
         title.className = "bd-mention-title";
-        title.textContent = "选择参考素材";
+        title.textContent = t("mention.title");
         m.appendChild(title);
 
         if (!filtered.length) {
             const empty = document.createElement("div");
             empty.className = "bd-mention-empty";
-            empty.textContent = all.length ? "无匹配素材" : "请先上传参考图或参考音频";
+            empty.textContent = all.length ? t("mention.emptyFilter") : t("mention.emptyNoUpload");
             m.appendChild(empty);
         } else {
             filtered.forEach((item, i) => {

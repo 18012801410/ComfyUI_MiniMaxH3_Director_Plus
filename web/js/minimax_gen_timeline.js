@@ -1,5 +1,7 @@
 ﻿/** Shared helpers for MiniMax H3 Director generation tasks. */
 
+import { t } from "./minimax_i18n.js";
+
 /** MiniMax H3 canvas snap (official nodes use 32). */
 export const MINIMAX_CANVAS_MULTIPLE = 32;
 
@@ -210,9 +212,9 @@ export const MAX_GEN_FRAMES = 512;
 /** MiniMax H3 ReferenceToVideo supports up to 9 reference images. */
 export const MAX_REFERENCE_IMAGES = 9;
 
-/** User-facing slot label: index 0 → 图片1. */
+/** User-facing slot label: index 0 → Picture/图片 1. */
 export function refImageLabel(index) {
-    return `图片${Number(index) + 1}`;
+    return t("slot.picture", { n: Number(index) + 1 });
 }
 
 /** Prompt token for MiniMax: index 0 → <Picture 1>. */
@@ -223,9 +225,9 @@ export function refImagePromptTag(index) {
 /** Official MiniMaxH3ReferenceToVideo supports up to 3 standalone reference audios. */
 export const MAX_REFERENCE_AUDIOS = 3;
 
-/** User-facing slot label: index 0 → 音频1. */
+/** User-facing slot label: index 0 → Audio/音频 1. */
 export function refAudioLabel(index) {
-    return `音频${Number(index) + 1}`;
+    return t("slot.audio", { n: Number(index) + 1 });
 }
 
 /** Prompt token for MiniMax: index 0 → <Audio 1>. */
@@ -236,9 +238,9 @@ export function refAudioPromptTag(index) {
 /** Official MiniMaxH3ReferenceToVideo supports up to 3 reference videos. */
 export const MAX_REFERENCE_VIDEOS = 3;
 
-/** User-facing slot label: index 0 → 视频1. */
+/** User-facing slot label: index 0 → Video/视频 1. */
 export function refVideoLabel(index) {
-    return `视频${Number(index) + 1}`;
+    return t("slot.video", { n: Number(index) + 1 });
 }
 
 /** Prompt token for MiniMax: index 0 → <Video 1>. */
