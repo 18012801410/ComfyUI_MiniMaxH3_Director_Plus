@@ -203,14 +203,18 @@ def build_director_audio_outputs(
     segment_audios: list | None = None,
     audio_mode: str | None = None,
     mute_audio: bool = False,
-) -> list[dict[str, Any]]:
-    """Return one AUDIO dict per images_out entry (never None)."""
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return (AUDIO list, source_fallback).
+
+    source_fallback is None or "silent" when audioMode=source could not
+    extract a usable track (falls back to mute, never model audio).
+    """
     fps = float(plan.frame_rate or 24.0)
     mode = AUDIO_MODE_MUTE if mute_audio else (audio_mode or resolve_audio_mode(plan))
     log.info("Director audio mode: %s (task=%s)", mode, getattr(plan, "global_task_key", ""))
 
     if mode == AUDIO_MODE_MUTE:
-        return [empty_audio_dict(SILENT_SAMPLE_RATE) for _ in images_out]
+        return [empty_audio_dict(SILENT_SAMPLE_RATE) for _ in images_out], None
 
     # Prefer model audio only in generate mode.
     if mode == AUDIO_MODE_GENERATE and segment_audios:
@@ -228,7 +232,7 @@ def build_director_audio_outputs(
                     "Merged %d segment audio clip(s) for export=all (%d frames).",
                     len(segment_audios), n_frames,
                 )
-                return [merged]
+                return [merged], None
 
         outputs: list[dict[str, Any]] = []
         for i, tensor in enumerate(images_out):
@@ -242,14 +246,15 @@ def build_director_audio_outputs(
             else:
                 outputs.append(empty_audio_dict(SILENT_SAMPLE_RATE))
         if any(_audio_has_samples(a) for a in outputs):
-            return outputs
+            return outputs, None
 
     silent_sample_rate = SILENT_SAMPLE_RATE
     # source mode always extracts; generate falls back to source when task allows.
     if mode != AUDIO_MODE_SOURCE and not task_passes_source_audio(plan.global_task_key):
-        return [empty_audio_dict(silent_sample_rate) for _ in images_out]
+        return [empty_audio_dict(silent_sample_rate) for _ in images_out], None
 
     timeline = plan.raw or {}
+    source_fallback: str | None = None
 
     if export_segments:
         if plan.run_indices is not None:
@@ -267,9 +272,13 @@ def build_director_audio_outputs(
                 hint = diagnose_source_audio_failure(
                     timeline, seg.start_frame, seg.end_frame, fps
                 )
-                raise ValueError(
-                    f"声音=使用原声，但无法提取片段 #{seg.index + 1} 的源音频：{hint}"
+                # Soft fallback: silent only (do not substitute model audio).
+                log.warning(
+                    "声音=使用原声，但片段 #%s 无源音轨（%s）；已回退为静音。",
+                    seg.index + 1, hint,
                 )
+                extracted = None
+                source_fallback = "silent"
             audio = _coerce_audio_output(extracted, sample_rate=silent_sample_rate)
             n_frames = int(getattr(tensor, "shape", [0])[0] or seg.frame_count or 0)
             sr = int(audio.get("sample_rate") or silent_sample_rate)
@@ -278,7 +287,7 @@ def build_director_audio_outputs(
                     audio, frame_count=n_frames, fps=fps, sample_rate=sr
                 )
             )
-        return outputs
+        return outputs, source_fallback
 
     end = max(0, int(output_frame_end if output_frame_end is not None else plan.total_frames))
     if images_out and hasattr(images_out[0], "shape"):
@@ -286,13 +295,20 @@ def build_director_audio_outputs(
     extracted = extract_timeline_audio(timeline, 0, end, fps) if end > 0 else None
     if mode == AUDIO_MODE_SOURCE and not _audio_has_samples(extracted):
         hint = diagnose_source_audio_failure(timeline, 0, end, fps)
-        raise ValueError(f"声音=使用原声，但无法提取源视频音轨：{hint}")
+        # Soft fallback after a successful video run: silent only (no model audio).
+        log.warning(
+            "声音=使用原声，但源视频无音轨（%s）；已回退为静音。",
+            hint,
+        )
+        extracted = None
+        source_fallback = "silent"
     merged = _coerce_audio_output(extracted, sample_rate=silent_sample_rate)
     sr = int(merged.get("sample_rate") or silent_sample_rate)
     merged = _pad_or_trim_audio_to_frames(
         merged, frame_count=end, fps=fps, sample_rate=sr
     )
-    return [merged] if len(images_out) == 1 else [empty_audio_dict(silent_sample_rate) for _ in images_out]
+    out = [merged] if len(images_out) == 1 else [empty_audio_dict(silent_sample_rate) for _ in images_out]
+    return out, source_fallback
 
 
 def source_audio_report_note(
@@ -303,18 +319,35 @@ def source_audio_report_note(
     output_frame_end: int | None = None,
     used_generated_audio: bool = False,
     audio_mode: str | None = None,
+    source_fallback: str | None = None,
 ) -> str:
     mode = audio_mode or resolve_audio_mode(plan)
     if mode == AUDIO_MODE_MUTE:
         return "\n\nAudio: muted (silent output)."
     if mode == AUDIO_MODE_SOURCE:
-        if any(_audio_has_samples(a) for a in audio_out):
-            return (
-                "\n\nSource audio: extracted from input video "
-                "(frame-aligned PCM cut, length = picture / timeline fps)."
-            )
-        # Fall through to diagnose below.
-    elif used_generated_audio and any(_audio_has_samples(a) for a in audio_out):
+        if source_fallback == "silent" or not any(_audio_has_samples(a) for a in audio_out):
+            fps = float(plan.frame_rate or 24.0)
+            timeline = plan.raw or {}
+            if export_segments and plan.segments:
+                if plan.run_indices is not None:
+                    seg_indices = sorted(plan.run_indices)
+                else:
+                    seg_indices = list(range(len(plan.segments)))
+                seg = plan.segments[seg_indices[0]] if seg_indices else plan.segments[0]
+                start, end = int(seg.start_frame), int(seg.end_frame)
+            else:
+                start = 0
+                end = max(
+                    0,
+                    int(output_frame_end if output_frame_end is not None else plan.total_frames),
+                )
+            hint = diagnose_source_audio_failure(timeline, start, end, fps)
+            return f"\n\nSource audio: none — {hint} (fell back to silent)."
+        return (
+            "\n\nSource audio: extracted from input video "
+            "(frame-aligned PCM cut, length = picture / timeline fps)."
+        )
+    if used_generated_audio and any(_audio_has_samples(a) for a in audio_out):
         return (
             "\n\nGenerated audio: decoded from MiniMax H3 AV latent "
             "(frame-aligned to picture / timeline fps)."

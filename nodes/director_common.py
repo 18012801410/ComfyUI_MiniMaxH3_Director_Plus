@@ -286,7 +286,7 @@ def finalize_director_outputs(
     audio_frame_end = frame_count if not split_for_audio else None
     audio_mode = resolve_audio_mode(plan)
     use_generated = audio_mode == AUDIO_MODE_GENERATE
-    audio_out = build_director_audio_outputs(
+    audio_out, source_fallback = build_director_audio_outputs(
         plan,
         images_out,
         export_segments=split_for_audio,
@@ -301,6 +301,7 @@ def finalize_director_outputs(
         output_frame_end=audio_frame_end,
         used_generated_audio=bool(use_generated and segment_audios),
         audio_mode=audio_mode,
+        source_fallback=source_fallback,
     )
 
     split_source_outputs = export_segments or (is_batch and not video_batch)
