@@ -567,30 +567,39 @@ function snapDim(v, stride = 32) {
     return Math.max(stride, Math.round(v / stride) * stride);
 }
 
+/**
+ * Match Python ``lib.image_prep.fit_long_edge``:
+ * round(dim * scale / stride) * stride — keeps aspect, long side ≤ budget.
+ * Stride 16 (backend); stride 32 would bump 848 → 864.
+ */
+function snapScaledDim(dim, scale, stride = 16) {
+    return Math.max(stride, Math.round((dim * scale) / stride) * stride);
+}
+
 function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}) {
     const mode = String(output?.mode || "long_edge").toLowerCase();
-    const stride = 32;
+    const fixedStride = 32;
+    const longStride = 16;
     if (mode === "fixed") {
-        const w = snapDim(+(output?.width ?? fallback.width ?? 864), stride);
-        const h = snapDim(+(output?.height ?? fallback.height ?? 480), stride);
+        const w = snapDim(+(output?.width ?? fallback.width ?? 864), fixedStride);
+        const h = snapDim(+(output?.height ?? fallback.height ?? 480), fixedStride);
         return { mode: "fixed", width: w, height: h, refMaxSize: Math.max(w, h) };
     }
-    const longEdge = Math.max(stride, +(output?.longEdge ?? output?.long_edge ?? fallback.refMaxSize ?? 848));
+    const longEdge = Math.max(longStride, +(output?.longEdge ?? output?.long_edge ?? fallback.refMaxSize ?? 848));
     const sw = sourceW || 0;
     const sh = sourceH || 0;
     if (!sw || !sh) {
-        const w = snapDim(+(fallback.width ?? 864), stride);
-        const h = snapDim(+(fallback.height ?? 480), stride);
-        return { mode: "long_edge", width: w, height: h, refMaxSize: longEdge };
+        // Missing source: keep long-edge budget only — do not invent a 16:9 canvas
+        // (that would center-crop ultrawide footage later via fit_canvas).
+        return { mode: "long_edge", width: longEdge, height: longStride, refMaxSize: longEdge };
     }
-    if (Math.max(sw, sh) <= longEdge) {
-        return { mode: "long_edge", width: snapDim(sw, stride), height: snapDim(sh, stride), refMaxSize: longEdge };
-    }
-    const scale = longEdge / Math.max(sw, sh);
+    // Always recompute from source (even when already ≤ longEdge) so snapped
+    // dims stay aspect-correct; never reuse a stale fixed W×H.
+    const scale = Math.min(1, longEdge / Math.max(sw, sh));
     return {
         mode: "long_edge",
-        width: snapDim(Math.round(sw * scale), stride),
-        height: snapDim(Math.round(sh * scale), stride),
+        width: snapScaledDim(sw, scale, longStride),
+        height: snapScaledDim(sh, scale, longStride),
         refMaxSize: longEdge,
     };
 }
@@ -917,11 +926,12 @@ function parseTimeline(raw, totalFrames, fps) {
         videoClips: [],
         global: { taskType: "", prompt: "", refs: [], refAudios: [], referenceVideo: {}, continuousReference: false },
         output: {
-            mode: "fixed",
+            // v2v/rv2v default: scale by long edge (preserve aspect). Fixed = center-crop.
+            mode: "long_edge",
             aspectRatio: DEFAULT_ASPECT_RATIO,
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 864, width: 864, height: 480,
+            longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
             continuityEnabled: false, continuityOverlapFrames: 9,
@@ -2907,8 +2917,20 @@ class MiniMaxH3DirectorEditor {
             this.updateOutputModeUI();
         } else if (this.outMode) {
             this.outMode.disabled = false;
+            // Video edit (v2v/rv2v): prefer long-edge so ultrawide sources are not
+            // center-cropped into a leftover 16:9 fixed canvas from batch modes.
+            this.timeline.output = this.timeline.output || {};
+            if (!this.timeline.output.mode || this.timeline.output.mode === "fixed") {
+                const fromBatchFixed = this._lastOutputWasBatchFixed;
+                if (fromBatchFixed || !this.timeline.output.mode) {
+                    this.timeline.output.mode = "long_edge";
+                    if (!this.timeline.output.longEdge) this.timeline.output.longEdge = 848;
+                }
+            }
+            this._lastOutputWasBatchFixed = false;
             this.updateOutputModeUI();
         }
+        if (isBatch || isGen || isFl2v) this._lastOutputWasBatchFixed = true;
 
         if (this.outHint) {
             const isVideoEdit = taskKey === "v2v" || taskKey === "rv2v";
@@ -3283,9 +3305,14 @@ class MiniMaxH3DirectorEditor {
         }
         if (clips.length === 1) {
             const c = clips[0];
-            const dim = c.storageWidth && c.storageHeight
-                ? ` · ${c.storageWidth}×${c.storageHeight}`
-                : (this._storageWidth && this._storageHeight ? ` · ${this._storageWidth}×${this._storageHeight}` : "");
+            const nativeWh = c.width && c.height ? `${c.width}×${c.height}` : "";
+            const storeW = c.storageWidth || this._storageWidth;
+            const storeH = c.storageHeight || this._storageHeight;
+            const storeWh = storeW && storeH ? `${storeW}×${storeH}` : "";
+            let dim = "";
+            if (nativeWh && storeWh && nativeWh !== storeWh) dim = ` · ${nativeWh} → ${storeWh}`;
+            else if (nativeWh) dim = ` · ${nativeWh}`;
+            else if (storeWh) dim = ` · ${storeWh}`;
             const nativeHint = c.nativeFps > 0 ? t("canvas.nativeFps", { fps: formatProbeFps(c.nativeFps) }) : "";
             const tlFps = this.getFrameRate();
             const dur = this.getTimelineDurationSec().toFixed(2);
@@ -3865,13 +3892,17 @@ class MiniMaxH3DirectorEditor {
     getSourceDimensions() {
         const clips = this.getVideoClips?.() || [];
         const video = clips[0] || this.timeline.video || {};
+        // Prefer native clip/source size — never fall back to output canvas W×H
+        // (that makes long_edge look like a no-op and keeps a cropped 16:9).
         if (+(video.width || 0) > 0 && +(video.height || 0) > 0) {
             return { width: +video.width, height: +video.height };
         }
-        return {
-            width: this.timeline.width || this.widthWidget?.value || 864,
-            height: this.timeline.height || this.heightWidget?.value || 480,
-        };
+        for (const clip of clips) {
+            if (+(clip?.width || 0) > 0 && +(clip?.height || 0) > 0) {
+                return { width: +clip.width, height: +clip.height };
+            }
+        }
+        return { width: 0, height: 0 };
     }
 
     _refreshVideoStorageDimensions(resolved) {
@@ -3890,11 +3921,11 @@ class MiniMaxH3DirectorEditor {
 
     syncOutputUIFromTimeline() {
         const out = this.timeline.output || {
-            mode: "fixed",
+            mode: "long_edge",
             aspectRatio: DEFAULT_ASPECT_RATIO,
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 864, width: 864, height: 480,
+            longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
             continuityEnabled: false, continuityOverlapFrames: 9,
@@ -3916,7 +3947,7 @@ class MiniMaxH3DirectorEditor {
                 this.timeline.output = { ...out };
             }
         }
-        if (this.outMode) this.outMode.value = out.mode || "fixed";
+        if (this.outMode) this.outMode.value = out.mode || "long_edge";
         if (this.outAspect) {
             const ar = isCustomAspectRatio(out.aspectRatio)
                 ? CUSTOM_ASPECT_RATIO
@@ -4101,12 +4132,21 @@ class MiniMaxH3DirectorEditor {
             return;
         }
         const src = this.getSourceDimensions();
-        const resolved = resolveOutputDimensions(src.width, src.height, this.timeline.output, {
+        const out = this.timeline.output || {};
+        const resolved = resolveOutputDimensions(src.width, src.height, out, {
             width: this.widthWidget?.value,
             height: this.heightWidget?.value,
             refMaxSize: this.refMaxWidget?.value,
         });
-        this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${this._exportPreviewSuffix()}`;
+        if (src.width > 0 && src.height > 0) {
+            const mode = (out.mode || "long_edge").toLowerCase();
+            const note = mode === "long_edge"
+                ? t("output.preview.scaleKeepAspect")
+                : t("output.preview.fixedCrop");
+            this.outPreview.textContent = `${src.width}×${src.height} → ${resolved.width}×${resolved.height}${note}${this._exportPreviewSuffix()}`;
+        } else {
+            this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${t("output.preview.needSourceForLongEdge")}${this._exportPreviewSuffix()}`;
+        }
     }
 
     _exportPreviewSuffix() {
@@ -4128,11 +4168,11 @@ class MiniMaxH3DirectorEditor {
 
     onOutputField(key, value) {
         this.timeline.output = this.timeline.output || {
-            mode: "fixed",
+            mode: "long_edge",
             aspectRatio: DEFAULT_ASPECT_RATIO,
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 864, width: 864, height: 480,
+            longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
             continuityEnabled: false, continuityOverlapFrames: 9,

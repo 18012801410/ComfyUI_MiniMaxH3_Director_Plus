@@ -81,6 +81,8 @@ const ZH = {
     "output.preview.exportFrames": "· 导出 {n} 帧",
     "output.preview.exportFramesPartial": "· 导出 {n}/{total} 帧",
     "output.preview.timeFps": "· {dur}s @ {fps}fps",
+    "output.preview.scaleKeepAspect": " · 等比缩放",
+    "output.preview.fixedCrop": " · 固定画布（可能裁剪）",
     "output.preview.mp": "→ {w}×{h} · {ar} · {mp}MP{suffix}",
 
     "panel.globalPromptAndRefs": "全局提示词 & 参考图 (图片1–9)",
@@ -414,6 +416,8 @@ const EN = {
     "output.preview.exportFrames": "· Export {n} frames",
     "output.preview.exportFramesPartial": "· Export {n}/{total} frames",
     "output.preview.timeFps": "· {dur}s @ {fps}fps",
+    "output.preview.scaleKeepAspect": " · keep aspect",
+    "output.preview.fixedCrop": " · fixed canvas (may crop)",
     "output.preview.mp": "→ {w}×{h} · {ar} · {mp}MP{suffix}",
 
     "panel.globalPromptAndRefs": "Global prompt & refs (Picture 1–9)",
