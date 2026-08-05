@@ -26,7 +26,6 @@ import {
     resolveTaskKey,
 } from "./minimax_gen_timeline.js";
 import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
-import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
 
@@ -220,13 +219,13 @@ export function mountImageBatchPanel(root) {
     panel.dataset.r = "batch-panel";
     panel.innerHTML = `
         <div class="bd-batch-toolbar">
-            <button type="button" class="bd-btn bd-btn-primary" data-a="batch-add" data-i18n="batch.addPromptGroup">+ 添加提示词组</button>
-            <button type="button" class="bd-btn bd-batch-run-select hidden" data-a="batch-run-select" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.batchRunSelect">选择运行</button>
-            <label class="bd-batch-run-all hidden" data-r="batch-run-all-wrap" data-i18n-title="tooltip.runSelectAll">
+            <button type="button" class="bd-btn bd-btn-primary" data-a="batch-add">+ 添加提示词组</button>
+            <button type="button" class="bd-btn bd-batch-run-select hidden" data-a="batch-run-select" title="开启后可勾选要运行的提示词组">选择运行</button>
+            <label class="bd-batch-run-all hidden" data-r="batch-run-all-wrap" title="勾选=全选，取消=全部不选">
                 <input type="checkbox" data-r="batch-run-all-cb">
-                <span data-i18n="toolbar.selectAll">全选</span>
+                <span>全选</span>
             </label>
-            <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
+            <span class="bd-meta" data-r="batch-hint">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
         <div class="bd-batch-list" data-r="batch-list"></div>`;
@@ -875,10 +874,15 @@ export function renderImageBatchGroups(editor) {
     const fps = parseFloat(editor.frameRateWidget?.value || editor.timeline?.frameRate || 24);
 
     if (editor.batchHint) {
-        const hintKey = `batch.hint.${key}`;
-        editor.batchHint.textContent = t(hintKey) !== hintKey
-            ? t(hintKey)
-            : t(isVideo ? "batch.hint.defaultVideo" : "batch.hint.defaultImage");
+        const hints = {
+            t2i: "文生图 · 开启「选择运行」可只跑勾选的组",
+            i2i: "图生图 · 每组需上传源图 · 开启「选择运行」可只跑勾选的组",
+            r2i: "参考主体生图 · 请在每组卡片上传参考图（图片1–9）",
+            t2v: "文生视频 · 每组可设秒数 · 开启「选择运行」可只跑勾选的组",
+            r2v: "参考改视频 · 每组可上传图片1–9 / 音频1–3 / 视频1–3（交互类似首尾帧分组）",
+            i2v: "图生视频 · 每组可设秒数 · 开启「选择运行」可只跑勾选的组",
+        };
+        editor.batchHint.textContent = hints[key] || (isVideo ? "每组生成一段视频" : "每组生成 1 张图片");
     }
     if (editor.batchI2vNotice) {
         const needsRefs = key === "r2i" || key === "r2v";
@@ -888,7 +892,9 @@ export function renderImageBatchGroups(editor) {
             || (s.refVideos || []).length > 0
         ));
         if (needsRefs && !hasAnyMedia) {
-            editor.batchI2vNotice.textContent = t(key === "r2v" ? "batch.notice.r2vNoRefs" : "batch.notice.r2iNoRefs");
+            editor.batchI2vNotice.textContent = key === "r2v"
+                ? "当前没有参考素材：请在素材组中上传图片 / 音频 / 视频。未上传时生成会退化成文生视频（t2v）。"
+                : "当前没有参考图：请在提示词组卡片中上传图片1–9。未上传时生成会退化成文生图（t2i）。";
             editor.batchI2vNotice.classList.add("visible");
         } else {
             editor.batchI2vNotice.classList.remove("visible");
@@ -897,8 +903,7 @@ export function renderImageBatchGroups(editor) {
     }
     const addBtn = editor.batchPanel?.querySelector('[data-a="batch-add"]');
     if (addBtn) {
-        addBtn.textContent = t(key === "r2v" ? "batch.addRefGroup" : "batch.addPromptGroup");
-        addBtn.setAttribute("data-i18n", key === "r2v" ? "batch.addRefGroup" : "batch.addPromptGroup");
+        addBtn.textContent = key === "r2v" ? "+ 添加素材组" : "+ 添加提示词组";
         // r2v: add from toolbar (left of task select), like fl2v.
         addBtn.classList.toggle("hidden", key === "r2v");
     }
@@ -941,7 +946,7 @@ export function renderImageBatchGroups(editor) {
             runCb.type = "checkbox";
             runCb.className = "bd-batch-run-check";
             runCb.checked = runEnabled;
-            runCb.title = t("tooltip.batchRunCheck");
+            runCb.title = "勾选后参与本次运行（与时间轴同步）";
             runCb.onclick = (e) => {
                 e.stopPropagation();
                 editor.toggleSegmentRun(index);
@@ -949,7 +954,7 @@ export function renderImageBatchGroups(editor) {
             head.appendChild(runCb);
         }
         const title = document.createElement("b");
-        title.textContent = t(isR2v ? "batch.groupTitle.asset" : "batch.groupTitle.prompt", { n: index + 1 });
+        title.textContent = isR2v ? `素材组 ${index + 1}` : `提示词组 ${index + 1}`;
         head.appendChild(title);
         const meta = document.createElement("div");
         meta.className = "bd-batch-head-meta";
@@ -961,7 +966,7 @@ export function renderImageBatchGroups(editor) {
             seg.durationSec = curSec;
             seg.frameCount = frames;
             seg.length = frames;
-            secRow.innerHTML = `${t("batch.seconds")} <input type="number" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames })}">`;
+            secRow.innerHTML = `秒数 <input type="number" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="用户填写秒数；帧数按官方公式换算 → ${frames} 帧">`;
             const secInput = secRow.querySelector("input");
             const applySec = () => {
                 const sec = clamp(
@@ -973,7 +978,7 @@ export function renderImageBatchGroups(editor) {
                 const fc = durationToMiniMaxFrames(rounded, 24);
                 // Keep the user's seconds as-is; do NOT rewrite to frames/fps.
                 secInput.value = String(rounded);
-                secInput.title = t("batch.durationTooltip", { frames: fc });
+                secInput.title = `用户填写秒数；帧数按官方公式换算 → ${fc} 帧`;
                 seg.durationSec = rounded;
                 seg.frameCount = fc;
                 seg.length = fc;
@@ -1152,12 +1157,10 @@ export function setR2vToolbar(editor, enabled) {
     if (del) {
         del.disabled = false;
         del.classList.remove("bd-disabled", "hidden");
-        del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
-        del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
-        del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
+        del.textContent = enabled ? "删除选中组" : "删除片段";
         del.title = enabled
-            ? t("tooltip.deleteSelectedFl2vGroup")
-            : t("tooltip.deleteSegment");
+            ? "删除当前选中的素材组"
+            : "删除选中片段并裁剪视频，时间轴自动衔接";
     }
     const addBtn = editor.root?.querySelector('[data-a="r2v-add-group"]');
     if (addBtn) {
