@@ -16,6 +16,7 @@ import {
     preferredDurationSecFromFrames,
     resolveTaskKey,
 } from "./minimax_gen_timeline.js";
+import { t } from "./minimax_i18n.js";
 
 export const FL2V_STYLES = `
 .bd-fl2v-detail-wrap{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
@@ -650,22 +651,21 @@ export function mountFl2vPanel(parent) {
     const wrap = document.createElement("div");
     wrap.className = "bd-fl2v-detail-wrap";
     wrap.innerHTML = `
-        <div class="bd-fl2v-hint">
-            <b>怎么用</b>：
-            ① 点<strong>添加一组</strong>创建一镜；每组有<strong>首帧</strong>（必传）和<strong>尾帧</strong>（可选，空=图生视频）；
-            ② 拖时间轴右边界改本镜时长；<strong>总时长 = 各组之和</strong>；
-            ③ 拖镜卡片<strong>标题栏</strong>可互换组位置；图位之间拖图：同组互换、跨组复制；
-            ④ 选中一组后可编辑提示词，或点<strong>删除选中组</strong>。
+        <div class="bd-fl2v-hint" data-r="fl2v-hint">
+            <b data-i18n="panel.fl2v.howToTitle">怎么用</b>：
+            <span data-i18n-html="panel.fl2v.hint"></span>
         </div>
         <div class="bd-fl2v-shots" data-r="fl2v-shots"></div>
         <div class="bd-fl2v-detail hidden" data-r="fl2v-detail">
-            <span class="bd-label">本镜提示词</span>
-            <textarea data-r="fl2v-prompt" placeholder="描述这一镜的运动/变化（可选）"></textarea>
+            <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span>
+            <textarea data-r="fl2v-prompt" data-i18n-placeholder="placeholder.fl2vShot" placeholder=""></textarea>
             <textarea data-r="fl2v-negative" class="hidden" hidden aria-hidden="true"></textarea>
         </div>
         <input type="file" accept="image/*" hidden data-r="fl2v-file">
     `;
     parent.appendChild(wrap);
+    const hintBody = wrap.querySelector("[data-i18n-html]");
+    if (hintBody) hintBody.innerHTML = t("panel.fl2v.hint");
     return {
         root: wrap,
         hint: wrap.querySelector(".bd-fl2v-hint"),
@@ -1015,31 +1015,32 @@ function renderFl2vShotCards(editor) {
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
         const fc = shotFrameCount(shot, fl2vFps(editor));
+        const badge = shot.endImage?.imageFile ? t("fl2v.badge.startEnd") : t("fl2v.badge.i2v");
         card.innerHTML = `
             <div class="bd-fl2v-shot-head">
-                <b>镜 ${i + 1}</b>
-                <span class="bd-fl2v-shot-meta">${shot.endImage?.imageFile ? "首尾帧" : "图生视频"} · ${fc}f</span>
+                <b>${t("panel.fl2v.shotN", { n: i + 1 })}</b>
+                <span class="bd-fl2v-shot-meta">${badge} · ${fc}f</span>
             </div>
             <div class="bd-fl2v-slots">
                 <div class="bd-fl2v-slot-wrap${startUrl ? " has-img" : ""}">
-                    <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="上传首帧（必传）；可拖到其它图位">
+                    <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="${t("tooltip.fl2vStartSlot")}">
                         <span class="tag start">START</span>
-                        ${startUrl ? `<img src="${startUrl}" alt="">` : '<span class="ph">首帧<br>必传</span>'}
+                        ${startUrl ? `<img src="${startUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.startRequired")}</span>`}
                     </div>
-                    ${startUrl ? `<button type="button" class="x" data-clear="start" title="清除" draggable="false">×</button>` : ""}
+                    ${startUrl ? `<button type="button" class="x" data-clear="start" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
                 </div>
                 <div class="bd-fl2v-slot-wrap${endUrl ? " has-img" : ""}">
-                    <div class="bd-fl2v-slot${endUrl ? " has-img" : ""}" data-slot="end" title="上传尾帧（可选）；可拖到其它图位">
+                    <div class="bd-fl2v-slot${endUrl ? " has-img" : ""}" data-slot="end" title="${t("tooltip.fl2vEndSlot")}">
                         <span class="tag end">END</span>
-                        ${endUrl ? `<img src="${endUrl}" alt="">` : '<span class="ph">尾帧<br>可选</span>'}
+                        ${endUrl ? `<img src="${endUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.endOptional")}</span>`}
                     </div>
-                    ${endUrl ? `<button type="button" class="x" data-clear="end" title="清除" draggable="false">×</button>` : ""}
+                    ${endUrl ? `<button type="button" class="x" data-clear="end" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
                 </div>
             </div>
-            <label class="bd-fl2v-shot-row" title="本镜时长（秒）">
-                时长
+            <label class="bd-fl2v-shot-row" title="${t("tooltip.fl2vShotDuration")}">
+                ${t("panel.fl2v.duration")}
                 <input type="number" class="bd-num" data-r="shot-sec" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${shot.durationSec}">
-                秒
+                ${t("panel.fl2v.seconds")}
             </label>
         `;
         card.addEventListener("click", (e) => {
@@ -1245,7 +1246,7 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
         ctx.font = "12px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("未上传首帧", startX + pxWidth / 2, y0 + h / 2);
+        ctx.fillText(t("canvas.noStartFrame"), startX + pxWidth / 2, y0 + h / 2);
         ctx.restore();
         return;
     }
@@ -1428,8 +1429,11 @@ export function setFl2vToolbar(editor, enabled) {
     if (del) {
         del.disabled = false;
         del.classList.remove("bd-disabled", "hidden");
-        del.textContent = enabled ? "删除选中组" : "删除片段";
-        del.title = enabled ? "删除当前选中的一组首尾帧" : "删除选中片段并裁剪视频，时间轴自动衔接";
+        del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
+        del.title = enabled ? t("tooltip.deleteSelectedFl2vGroup") : t("tooltip.deleteSegment");
+        // Keep data-i18n in sync when locale refreshes static attrs later.
+        del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
+        del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
     }
     for (const sel of ['[data-a="fl2v-insert-before"]', '[data-a="fl2v-insert-after"]', '[data-a="fl2v-replace"]']) {
         const btn = editor.root?.querySelector(sel);
