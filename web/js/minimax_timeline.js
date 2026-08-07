@@ -94,7 +94,7 @@ const SEG_LABEL_H = 20;
 const TRACK_H = 160;
 const TRACK_Y = RULER_H + SEG_LABEL_H;
 const STAGE_PREVIEW_H = 220;
-const LIVE_SAMPLE_PREVIEW_H = 220;
+const LIVE_SAMPLE_PREVIEW_H = 320;
 const MIN_SEG = 4;
 const HANDLE_PX = 14;
 /** Canvas-drawn run-select checkbox (not a DOM control). */
@@ -432,8 +432,8 @@ const STYLES = `
 .bd-live-sample-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .bd-live-sample-head b{color:#f0f0f0;font-size:12px;font-weight:650;letter-spacing:.02em}
 .bd-live-sample-head .bd-meta{color:#888;font-size:11px}
-.bd-live-sample-body{position:relative;width:100%;min-height:160px;max-height:240px;background:#0a0a0a;border:1px solid #262626;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
-.bd-live-sample-body img{max-width:100%;max-height:240px;width:auto;height:auto;object-fit:contain;display:block}
+.bd-live-sample-body{position:relative;width:100%;min-height:220px;max-height:360px;flex:1 1 auto;background:#0a0a0a;border:1px solid #262626;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+.bd-live-sample-body img{width:100%;height:100%;max-width:100%;max-height:360px;object-fit:contain;display:block}
 .bd-live-sample-body img.hidden{display:none!important}
 .bd-live-sample-empty{color:#666;font-size:12px;text-align:center;padding:16px;line-height:1.45}
 .bd-live-sample-empty.hidden{display:none!important}

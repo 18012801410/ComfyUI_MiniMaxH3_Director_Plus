@@ -24,7 +24,9 @@ export const FL2V_STYLES = `
 .bd-fl2v-hint{color:#aaa;font-size:11px;line-height:1.45;background:#181818;border:1px solid #333;border-radius:6px;padding:8px 10px}
 .bd-fl2v-hint b{color:#4fff8f;font-weight:600}
 .bd-fl2v-workbench{display:flex;flex-wrap:wrap;gap:12px;align-items:stretch;width:100%;box-sizing:border-box}
-.bd-fl2v-workbench .bd-live-sample{flex:1 1 300px;min-width:260px;max-width:520px}
+.bd-fl2v-workbench .bd-live-sample{flex:1 1 320px;min-width:280px;max-width:560px;min-height:320px;display:flex;flex-direction:column}
+.bd-fl2v-workbench .bd-live-sample .bd-live-sample-body{flex:1 1 auto;min-height:260px;max-height:none}
+.bd-fl2v-workbench .bd-live-sample .bd-live-sample-body img{width:100%;height:100%;max-height:420px;object-fit:contain}
 .bd-fl2v-workbench .bd-fl2v-shots{flex:2 1 420px;min-width:220px}
 .bd-fl2v-shots{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
 .bd-fl2v-shot{width:220px;box-sizing:border-box;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;cursor:default;transition:border-color .15s,opacity .15s}
