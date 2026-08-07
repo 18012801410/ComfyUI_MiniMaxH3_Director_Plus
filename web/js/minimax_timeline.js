@@ -94,6 +94,7 @@ const SEG_LABEL_H = 20;
 const TRACK_H = 160;
 const TRACK_Y = RULER_H + SEG_LABEL_H;
 const STAGE_PREVIEW_H = 220;
+const LIVE_SAMPLE_PREVIEW_H = 220;
 const MIN_SEG = 4;
 const HANDLE_PX = 14;
 /** Canvas-drawn run-select checkbox (not a DOM control). */
@@ -421,6 +422,23 @@ const STYLES = `
 .bd-btn-del-split:hover{background:#4a1515;border-color:#f88;color:#fcc}
 .bd-btn-sm{padding:3px 8px;font-size:10px}
 .bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
+.bd-output .bd-btn-live-preview{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
+.bd-output .bd-btn-live-preview:hover{background:#2a2a2a;border-color:#555;color:#ddd}
+.bd-output .bd-btn-live-preview.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
+.bd-live-sample{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:linear-gradient(165deg,#1a1a1a 0%,#121212 100%);border:1px solid #333;border-radius:10px;flex-shrink:0}
+.bd-live-sample.hidden{display:none!important}
+.bd-live-sample.receiving{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
+.bd-live-sample-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.bd-live-sample-head b{color:#f0f0f0;font-size:12px;font-weight:650;letter-spacing:.02em}
+.bd-live-sample-head .bd-meta{color:#888;font-size:11px}
+.bd-live-sample-body{position:relative;width:100%;min-height:160px;max-height:240px;background:#0a0a0a;border:1px solid #262626;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+.bd-live-sample-body img{max-width:100%;max-height:240px;width:auto;height:auto;object-fit:contain;display:block}
+.bd-live-sample-body img.hidden{display:none!important}
+.bd-live-sample-empty{color:#666;font-size:12px;text-align:center;padding:16px;line-height:1.45}
+.bd-live-sample-empty.hidden{display:none!important}
+.bd-live-sample-badge{position:absolute;left:10px;bottom:10px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.75);color:#cfcfcf;font-size:11px;pointer-events:none}
+.bd-live-sample-badge.hidden{display:none!important}
+.bd-main>.bd-live-sample{margin:0 0 4px}
 .bd-run-select-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#aaa}
 .bd-run-select-all-wrap{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none;margin-left:2px}
 .bd-run-select-all-wrap.hidden{display:none!important}
@@ -450,7 +468,20 @@ const STYLES = `
 .bd-prompt-layout.bd-rv2v-layout{grid-template-columns:minmax(240px,.85fr) minmax(0,1.4fr);gap:12px}
 .bd-prompt-layout.bd-rv2v-layout>.bd-refs-col{order:1}
 .bd-prompt-layout.bd-rv2v-layout>.bd-prompt-col{order:2}
+/* rv2v live preview: under prompt (same stack as r2v right column) */
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col{gap:10px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col .bd-prompt{min-height:160px;flex:1 1 auto}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col>.bd-live-sample{margin:0;padding:8px 10px;min-height:0;flex:0 0 auto;border-radius:10px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body{min-height:110px;max-height:160px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body img{max-height:160px}
 .bd-prompt-layout.bd-v2v-layout{grid-template-columns:1fr;gap:0}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live{grid-template-columns:minmax(0,1.25fr) minmax(240px,.9fr);gap:12px;align-items:stretch}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-prompt-col{order:1;min-height:220px}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-prompt-col .bd-prompt{flex:1 1 auto;min-height:180px}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-refs-col{display:none!important}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-live-sample{order:2;margin:0;height:100%;min-height:220px;align-self:stretch}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live .bd-live-sample-body{flex:1 1 auto;min-height:180px;max-height:none}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live .bd-live-sample-body img{max-height:100%}
 .bd-prompt-col{display:flex;flex-direction:column;gap:5px;min-width:0}
 .bd-rv2v-layout .bd-prompt-col,.bd-v2v-layout .bd-prompt-col{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;min-height:220px}
 .bd-v2v-layout .bd-prompt-col{min-height:200px}
@@ -553,7 +584,9 @@ const STYLES = `
 ${IMAGE_BATCH_STYLES}
 ${FL2V_STYLES}
 @media(max-width:768px){
-.bd-prompt-layout,.bd-prompt-layout.bd-rv2v-layout,.bd-prompt-layout.bd-v2v-layout{grid-template-columns:1fr}
+.bd-prompt-layout,.bd-prompt-layout.bd-rv2v-layout,.bd-prompt-layout.bd-v2v-layout,.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live{grid-template-columns:1fr}
+.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-live-sample{order:3;min-height:160px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body{min-height:96px;max-height:140px}
 .bd-ref{max-height:64px}
 .bd-rv2v-layout .bd-ref{max-height:none}
 .bd-v2v-layout .bd-prompt,.bd-rv2v-layout .bd-prompt{min-height:140px}
@@ -764,7 +797,9 @@ function getDirectorUiHeight(editor) {
         return batchH + 140;
     }
     if (editor?.getDirectorMode?.() === "fl2v") {
-        return getFl2vUiHeight(editor) + 160;
+        let h = getFl2vUiHeight(editor) + 160;
+        if (editor?.needsLiveSamplePanel?.()) h += LIVE_SAMPLE_PREVIEW_H + 12;
+        return h;
     }
     let h = (editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H) + 370 + 52;
     if (
@@ -774,6 +809,10 @@ function getDirectorUiHeight(editor) {
         && !editor?.isFl2vMode?.()
     ) {
         h += STAGE_PREVIEW_H + 10;
+    }
+    // v2v live preview sits beside the prompt (no extra vertical stack).
+    if (editor?.needsLiveSamplePanel?.() && !editor?.usesV2vPromptStyle?.()) {
+        h += LIVE_SAMPLE_PREVIEW_H + 12;
     }
     return h;
 }
@@ -938,6 +977,7 @@ function parseTimeline(raw, totalFrames, fps) {
         },
         runSelectEnabled: false,
         runSelection: [],
+        liveTaePreview: true,
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
     };
     if (!raw?.trim()) return base;
@@ -1021,6 +1061,8 @@ function parseTimeline(raw, totalFrames, fps) {
         }
         data.runSelectEnabled = !!data.runSelectEnabled;
         data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
+        // Default on when missing (older timelines).
+        data.liveTaePreview = data.liveTaePreview !== false && data.live_tae_preview !== false;
         if (data.timelineMode === "fl2v" || resolveTaskKey(data.global?.taskType || "") === "fl2v") {
             data.timelineMode = "fl2v";
             data.editMode = "segment";
@@ -1570,8 +1612,31 @@ class MiniMaxH3DirectorEditor {
                 <label><input type="checkbox" data-r="segment-continuity-cb"><span data-i18n="output.segmentContinuity">段间引导</span></label>
                 <span class="bd-meta" data-i18n="output.continuityOverlap">参考帧数</span>
                 <input type="number" class="bd-num" data-r="segment-continuity-overlap" min="1" max="81" step="4" value="9" style="width:48px">
-            </span>`;
+            </span>
+            <button type="button" class="bd-btn bd-btn-live-preview active" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
+        this.outputBarEl = outputBar;
+
+        const liveSample = document.createElement("div");
+        liveSample.className = "bd-live-sample hidden";
+        liveSample.setAttribute("data-r", "live-sample");
+        liveSample.innerHTML = `
+            <div class="bd-live-sample-head">
+                <b data-i18n="liveSample.title">采样预览</b>
+                <span class="bd-meta" data-r="live-sample-meta" data-i18n="liveSample.idleHint">开启后，采样过程中显示实时画面</span>
+            </div>
+            <div class="bd-live-sample-body">
+                <img class="hidden" data-r="live-sample-img" alt="live preview">
+                <div class="bd-live-sample-empty" data-r="live-sample-empty" data-i18n="liveSample.waiting">等待采样…</div>
+                <div class="bd-live-sample-badge hidden" data-r="live-sample-badge"></div>
+            </div>`;
+        this.mainBody.appendChild(liveSample);
+        this.liveSampleEl = liveSample;
+        this.liveSampleImg = liveSample.querySelector('[data-r="live-sample-img"]');
+        this.liveSampleEmpty = liveSample.querySelector('[data-r="live-sample-empty"]');
+        this.liveSampleBadge = liveSample.querySelector('[data-r="live-sample-badge"]');
+        this.liveSampleMeta = liveSample.querySelector('[data-r="live-sample-meta"]');
+        this._liveSampleHost = "main";
 
         const bottom = document.createElement("div");
         bottom.className = "bd-split";
@@ -1834,10 +1899,13 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="lang-toggle"]', () => toggleLocale());
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
+        bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
         bind('[data-a="frame-prev"]', () => this.stepFrame(-1));
         bind('[data-a="frame-next"]', () => this.stepFrame(1));
         bind('[data-a="zoom-in"]', () => this.adjustZoom(0.5));
         bind('[data-a="zoom-out"]', () => this.adjustZoom(-0.5));
+        this.refreshLiveTaePreviewButton();
+        this.updateLiveSamplePanel();
 
         this.seekBar.oninput = () => {
             this.seekToFrame(+this.seekBar.value, { fromUi: true });
@@ -2855,6 +2923,7 @@ class MiniMaxH3DirectorEditor {
         this.timecodeEl?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
         this.viewport?.classList.toggle("hidden", isBatch && !isR2v);
         this.updateStageVisibility();
+        this.updateLiveSamplePanel();
         this.root.querySelector(".bd-split")?.classList.toggle("hidden", isBatch || isFl2v);
         this.batchPanel?.classList.toggle("hidden", !isBatch);
         this.fl2vUi?.root?.classList.toggle("hidden", !isFl2v);
@@ -3804,6 +3873,7 @@ class MiniMaxH3DirectorEditor {
         });
         if (!global) this.updateSelectionUI();
         else if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
+        this.updateLiveSamplePanel();
     }
 
     getRefTarget() {
@@ -3854,6 +3924,8 @@ class MiniMaxH3DirectorEditor {
         this.updateOutputPreview?.();
         this.updateSelectionUI?.();
         this.refreshLoopButtonTitle?.();
+        this.refreshLiveTaePreviewButton?.();
+        this.updateLiveSamplePanel?.();
         updateFl2vDetailUI?.(this);
         updateFl2vToolbarBtns?.(this);
         updateR2vToolbarBtns?.(this);
@@ -7471,6 +7543,169 @@ class MiniMaxH3DirectorEditor {
         btn.removeAttribute("data-i18n-title");
     }
 
+    isLiveTaePreviewEnabled() {
+        return this.timeline?.liveTaePreview !== false;
+    }
+
+    /** fl2v / v2v / rv2v (and aliases): show dedicated live-sample panel when toggle is on. */
+    needsLiveSamplePanel() {
+        if (!this.isLiveTaePreviewEnabled()) return false;
+        if (this.isImageBatch?.()) return false;
+        if (this.isFl2vMode?.()) return true;
+        const key = this.getTaskKey?.() || "";
+        return key === "v2v" || key === "mv2v" || key === "ads2v"
+            || key === "rv2v" || key === "vrc2v" || key === "vi2v";
+    }
+
+    toggleLiveTaePreview() {
+        this.timeline.liveTaePreview = !this.isLiveTaePreviewEnabled();
+        this.refreshLiveTaePreviewButton();
+        this.updateLiveSamplePanel();
+        this.scheduleTimelineSync();
+        this.updateDomWidgetHeight?.();
+        syncDirectorNodeSize(this.node, this);
+    }
+
+    refreshLiveTaePreviewButton() {
+        const btn = this.root?.querySelector('[data-a="live-tae-preview"]');
+        if (!btn) return;
+        const on = this.isLiveTaePreviewEnabled();
+        btn.classList.toggle("active", on);
+        btn.textContent = t("toolbar.liveTaePreview");
+        btn.title = on ? t("tooltip.liveTaePreviewOn") : t("tooltip.liveTaePreviewOff");
+        btn.setAttribute("data-i18n", "toolbar.liveTaePreview");
+        btn.removeAttribute("data-i18n-title");
+    }
+
+    _clearEmbeddedLiveLayoutClasses() {
+        this.globalPromptLayout?.classList.remove("bd-v2v-with-live", "bd-rv2v-with-live");
+        this.segPromptLayout?.classList.remove("bd-v2v-with-live", "bd-rv2v-with-live");
+    }
+
+    _activePromptLayout() {
+        return this.isGlobalMode?.() ? this.globalPromptLayout : this.segPromptLayout;
+    }
+
+    _placeLiveSamplePanel() {
+        const panel = this.liveSampleEl;
+        if (!panel) return;
+
+        if (this.isFl2vMode?.() && this.fl2vUi?.workbench && this.fl2vUi?.shotsEl) {
+            this._clearEmbeddedLiveLayoutClasses();
+            if (this._liveSampleHost !== "fl2v" || panel.parentElement !== this.fl2vUi.workbench) {
+                this.fl2vUi.workbench.insertBefore(panel, this.fl2vUi.shotsEl);
+                this._liveSampleHost = "fl2v";
+            }
+            return;
+        }
+
+        const layout = this._activePromptLayout();
+
+        // v2v: preview sits to the right of the prompt column.
+        if (this.usesV2vPromptStyle?.() && this.isLiveTaePreviewEnabled() && layout) {
+            if (panel.parentElement !== layout) layout.appendChild(panel);
+            this.globalPromptLayout?.classList.toggle("bd-v2v-with-live", layout === this.globalPromptLayout);
+            this.segPromptLayout?.classList.toggle("bd-v2v-with-live", layout === this.segPromptLayout);
+            this.globalPromptLayout?.classList.remove("bd-rv2v-with-live");
+            this.segPromptLayout?.classList.remove("bd-rv2v-with-live");
+            this._liveSampleHost = "v2v";
+            return;
+        }
+
+        // rv2v: preview under the prompt (same stack as r2v right column).
+        if (this.usesRv2vRefStyle?.() && this.isLiveTaePreviewEnabled() && layout) {
+            const promptCol = layout.querySelector(".bd-prompt-col");
+            if (promptCol) {
+                if (panel.parentElement !== promptCol) promptCol.appendChild(panel);
+                this.globalPromptLayout?.classList.toggle("bd-rv2v-with-live", layout === this.globalPromptLayout);
+                this.segPromptLayout?.classList.toggle("bd-rv2v-with-live", layout === this.segPromptLayout);
+                this.globalPromptLayout?.classList.remove("bd-v2v-with-live");
+                this.segPromptLayout?.classList.remove("bd-v2v-with-live");
+                this._liveSampleHost = "rv2v";
+                return;
+            }
+        }
+
+        this._clearEmbeddedLiveLayoutClasses();
+        if (this.outputBarEl && (this._liveSampleHost !== "main" || panel.parentElement !== this.mainBody)) {
+            this.outputBarEl.insertAdjacentElement("afterend", panel);
+            this._liveSampleHost = "main";
+        }
+    }
+
+    updateLiveSamplePanel() {
+        const panel = this.liveSampleEl;
+        if (!panel) return;
+        const show = this.needsLiveSamplePanel();
+        this._placeLiveSamplePanel();
+        panel.classList.toggle("hidden", !show);
+        if (!show) {
+            panel.classList.remove("receiving");
+            return;
+        }
+        if (!this._liveSampleB64) {
+            this.liveSampleImg?.classList.add("hidden");
+            this.liveSampleEmpty?.classList.remove("hidden");
+            this.liveSampleBadge?.classList.add("hidden");
+            if (this.liveSampleMeta) this.liveSampleMeta.textContent = t("liveSample.idleHint");
+        }
+    }
+
+    clearLiveSamplePreview() {
+        this._liveSampleB64 = "";
+        this._liveSampleStep = null;
+        this._liveSampleTotal = null;
+        this._liveSampleSeg = null;
+        this.liveSampleEl?.classList.remove("receiving");
+        if (this.liveSampleImg) {
+            this.liveSampleImg.removeAttribute("src");
+            this.liveSampleImg.classList.add("hidden");
+        }
+        this.liveSampleEmpty?.classList.remove("hidden");
+        this.liveSampleBadge?.classList.add("hidden");
+        if (this.liveSampleMeta) this.liveSampleMeta.textContent = t("liveSample.idleHint");
+    }
+
+    setLiveSamplePreview(detail = {}) {
+        if (!this.needsLiveSamplePanel()) return;
+        const b64 = detail.image_b64 || detail.imageB64 || "";
+        if (!b64) return;
+        this._placeLiveSamplePanel();
+        this.liveSampleEl?.classList.remove("hidden");
+        this._liveSampleB64 = b64;
+        this._liveSampleStep = detail.step ?? null;
+        this._liveSampleTotal = detail.total_steps ?? detail.totalSteps ?? null;
+        this._liveSampleSeg = detail.segment_index ?? detail.segmentIndex ?? null;
+
+        const src = b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
+        if (this.liveSampleImg) {
+            this.liveSampleImg.src = src;
+            this.liveSampleImg.classList.remove("hidden");
+        }
+        this.liveSampleEmpty?.classList.add("hidden");
+        this.liveSampleEl?.classList.toggle("receiving", !!detail.live);
+
+        const step = this._liveSampleStep;
+        const total = this._liveSampleTotal;
+        const seg = this._liveSampleSeg;
+        let badge = "";
+        if (step && total) badge = t("batch.generatingStep", { step, total });
+        else if (detail.live) badge = t("batch.generating");
+        if (this.liveSampleBadge) {
+            this.liveSampleBadge.textContent = badge;
+            this.liveSampleBadge.classList.toggle("hidden", !badge);
+        }
+        if (this.liveSampleMeta) {
+            const unit = this.isFl2vMode?.() ? t("unit.shot") : t("unit.segment");
+            const segLabel = (seg != null && seg !== "")
+                ? t("liveSample.segmentHint", { unit, n: Number(seg) + 1 })
+                : "";
+            this.liveSampleMeta.textContent = detail.live
+                ? (segLabel || t("liveSample.sampling"))
+                : (segLabel || t("liveSample.done"));
+        }
+    }
+
     setRunProgress(detail) {
         if (!this.runStatusEl) return;
         const timelineTotal = this.timeline?.segments?.length || 0;
@@ -7880,14 +8115,23 @@ app.registerExtension({
 
         api.addEventListener("minimax_director_preview", ({ detail }) => {
             const editor = findDirectorNode(detail?.node_id)?._minimaxEditor;
-            if (!editor?.isImageBatch?.()) return;
-            setImageBatchPreview(
-                editor,
-                detail?.segment_index ?? 0,
-                detail?.image_b64 || "",
-                { frames: detail?.frames, fps: detail?.fps },
-            );
-            editor.renderImageBatchGroups?.();
+            if (!editor) return;
+            if (editor.isImageBatch?.()) {
+                setImageBatchPreview(
+                    editor,
+                    detail?.segment_index ?? 0,
+                    detail?.image_b64 || "",
+                    {
+                        frames: detail?.live ? undefined : detail?.frames,
+                        fps: detail?.fps,
+                        live: !!detail?.live,
+                        step: detail?.step,
+                        total_steps: detail?.total_steps,
+                    },
+                );
+                return;
+            }
+            editor.setLiveSamplePreview?.(detail);
         });
 
         api.addEventListener("executing", ({ detail }) => {
@@ -7896,10 +8140,14 @@ app.registerExtension({
             const editor = node?._minimaxEditor;
             if (!editor) return;
             editor.flushTimelineSync?.();
+            editor.clearLiveSamplePreview?.();
             if (editor.isImageBatch?.()) {
                 for (const seg of editor.timeline.segments || []) {
                     seg.previewB64 = "";
                     seg.previewFrames = [];
+                    seg.previewLive = false;
+                    seg.previewStep = null;
+                    seg.previewTotalSteps = null;
                 }
                 editor.renderImageBatchGroups?.();
             }

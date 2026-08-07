@@ -346,6 +346,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-vpreview-ctrl{display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0}
 .bd-batch-vpreview-ctrl button{font-size:10px;padding:2px 8px}
 .bd-batch-vpreview-meta{color:#666;font-size:9px;text-align:center;flex-shrink:0}
+.bd-batch-live-preview{position:relative;width:100%;height:100%;min-height:96px;display:flex;align-items:center;justify-content:center}
+.bd-batch-live-preview img{max-width:100%;max-height:160px;object-fit:contain;display:block;border-radius:6px}
+.bd-batch-live-badge{position:absolute;left:8px;bottom:8px;padding:2px 7px;border-radius:999px;background:rgba(0,0,0,.72);color:#cfcfcf;font-size:10px;pointer-events:none}
 @media(max-width:860px){
 .bd-batch-r2v-body,.bd-batch-r2v-foot{grid-template-columns:1fr}
 .bd-batch-r2v .bd-batch-preview{min-height:110px}
@@ -1266,10 +1269,36 @@ function drawFrame(canvas, img) {
     ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
 }
 
+function mountLivePreview(el, seg, badgeText) {
+    stopPlayer(el);
+    el.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "bd-batch-live-preview";
+    const img = document.createElement("img");
+    img.className = "bd-live-preview";
+    img.alt = "live preview";
+    img.src = frameSrc(seg.previewB64);
+    const badge = document.createElement("div");
+    badge.className = "bd-batch-live-badge";
+    badge.textContent = badgeText || t("batch.generating");
+    wrap.appendChild(img);
+    wrap.appendChild(badge);
+    el.appendChild(wrap);
+}
+
 function mountVideoPreview(el, seg, running, fps) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
+        if (seg.previewB64) {
+            const step = seg.previewStep;
+            const total = seg.previewTotalSteps;
+            const badge = (step && total)
+                ? t("batch.generatingStep", { step, total })
+                : t("batch.generating");
+            mountLivePreview(el, seg, badge);
+            return;
+        }
         el.textContent = t("batch.generating");
         return;
     }
@@ -1333,6 +1362,15 @@ function renderImagePreview(el, seg, running) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
+        if (seg.previewB64) {
+            const step = seg.previewStep;
+            const total = seg.previewTotalSteps;
+            const badge = (step && total)
+                ? t("batch.generatingStep", { step, total })
+                : t("batch.generating");
+            mountLivePreview(el, seg, badge);
+            return;
+        }
         el.textContent = t("batch.generating");
         return;
     }
@@ -1573,11 +1611,45 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
     const seg = editor.timeline.segments[segmentIndex];
     if (!seg) return;
     seg.previewB64 = imageB64 || "";
+    if (extra.step != null) seg.previewStep = extra.step;
+    if (extra.total_steps != null) seg.previewTotalSteps = extra.total_steps;
     if (Array.isArray(extra.frames) && extra.frames.length) {
         seg.previewFrames = extra.frames;
         seg.previewFps = extra.fps || seg.previewFps || 24;
+        seg.previewLive = false;
     } else if (imageB64) {
-        seg.previewFrames = [imageB64];
+        if (extra.live) {
+            // Keep final multi-frame playback until a real final payload arrives.
+            if (!Array.isArray(seg.previewFrames) || seg.previewFrames.length <= 1) {
+                seg.previewFrames = [imageB64];
+            }
+            seg.previewLive = true;
+        } else {
+            seg.previewFrames = [imageB64];
+            seg.previewLive = false;
+        }
+    }
+
+    // Live sampling updates: patch the card preview in-place (avoid full re-render thrash).
+    if (extra.live && imageB64) {
+        const card = editor.batchList?.children?.[segmentIndex];
+        const preview = card?.querySelector?.(".bd-batch-preview");
+        if (preview) {
+            const step = seg.previewStep;
+            const total = seg.previewTotalSteps;
+            const badgeText = (step && total)
+                ? t("batch.generatingStep", { step, total })
+                : t("batch.generating");
+            let img = preview.querySelector("img.bd-live-preview");
+            let badge = preview.querySelector(".bd-batch-live-badge");
+            if (!img) {
+                mountLivePreview(preview, seg, badgeText);
+            } else {
+                img.src = frameSrc(imageB64);
+                if (badge) badge.textContent = badgeText;
+            }
+            return;
+        }
     }
     editor.renderImageBatchGroups();
 }

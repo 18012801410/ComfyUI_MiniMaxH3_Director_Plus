@@ -115,6 +115,9 @@ def report_director_segment_preview(
     height: int = 0,
     frames: list[str] | None = None,
     fps: float = 24.0,
+    live: bool = False,
+    step: int | None = None,
+    total_steps: int | None = None,
 ) -> None:
     if not node_id or not image_b64:
         return
@@ -124,10 +127,15 @@ def report_director_segment_preview(
         "image_b64": image_b64,
         "width": width,
         "height": height,
+        "live": bool(live),
     }
     if frames:
         payload["frames"] = frames
         payload["fps"] = fps
+    if step is not None:
+        payload["step"] = int(step)
+    if total_steps is not None:
+        payload["total_steps"] = int(total_steps)
     try:
         from server import PromptServer
 

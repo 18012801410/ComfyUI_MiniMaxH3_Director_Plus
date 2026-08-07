@@ -184,6 +184,9 @@ def execute_director_plan_core(
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
+    # UI toggle on the player bar (timeline.liveTaePreview); default on.
+    raw_live = (plan.raw or {}).get("liveTaePreview", (plan.raw or {}).get("live_tae_preview", True))
+    live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
 
     all_segments = plan.segments
     # Strictly honor「选择运行」— never force-sample unselected segments.
@@ -348,6 +351,27 @@ def execute_director_plan_core(
                 phase=phase, phase_value=value, phase_max=1, **meta,
             )
 
+        def _report_step_preview(step: int, total_steps: int, x0) -> None:
+            # Live frame for the batch-card preview slot (「生成中…」 area).
+            try:
+                from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
+
+                pil = x0_to_preview_pil(x0, max_side=512)
+                if pil is None:
+                    return
+                report_director_segment_preview(
+                    node_id,
+                    segment_index=seg.index,
+                    image_b64=pil_to_jpeg_b64(pil),
+                    width=pil.width,
+                    height=pil.height,
+                    live=True,
+                    step=step + 1,
+                    total_steps=total_steps,
+                )
+            except Exception as exc:
+                log.debug("Live TAE preview skipped: %s", exc)
+
         samples = sample_single_stage(
             model=model,
             positive=positive,
@@ -361,6 +385,8 @@ def execute_director_plan_core(
             shift_video=shift_video,
             shift_audio=shift_audio,
             on_phase=_report_sample_phase,
+            on_step_preview=_report_step_preview if live_tae_preview else None,
+            preview_every=1,
         )
 
         report_director_progress(

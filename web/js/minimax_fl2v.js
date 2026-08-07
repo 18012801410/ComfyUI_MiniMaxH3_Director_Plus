@@ -23,6 +23,9 @@ export const FL2V_STYLES = `
 .bd-fl2v-detail-wrap{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
 .bd-fl2v-hint{color:#aaa;font-size:11px;line-height:1.45;background:#181818;border:1px solid #333;border-radius:6px;padding:8px 10px}
 .bd-fl2v-hint b{color:#4fff8f;font-weight:600}
+.bd-fl2v-workbench{display:flex;flex-wrap:wrap;gap:12px;align-items:stretch;width:100%;box-sizing:border-box}
+.bd-fl2v-workbench .bd-live-sample{flex:1 1 300px;min-width:260px;max-width:520px}
+.bd-fl2v-workbench .bd-fl2v-shots{flex:2 1 420px;min-width:220px}
 .bd-fl2v-shots{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
 .bd-fl2v-shot{width:220px;box-sizing:border-box;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;cursor:default;transition:border-color .15s,opacity .15s}
 .bd-fl2v-shot:hover{border-color:#555}
@@ -663,7 +666,9 @@ export function mountFl2vPanel(parent) {
             <b data-i18n="panel.fl2v.howToTitle">怎么用</b>：
             <span data-i18n-html="panel.fl2v.hint"></span>
         </div>
-        <div class="bd-fl2v-shots" data-r="fl2v-shots"></div>
+        <div class="bd-fl2v-workbench" data-r="fl2v-workbench">
+            <div class="bd-fl2v-shots" data-r="fl2v-shots"></div>
+        </div>
         <div class="bd-fl2v-detail hidden" data-r="fl2v-detail">
             <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span>
             <textarea data-r="fl2v-prompt" data-i18n-placeholder="placeholder.fl2vShot" placeholder=""></textarea>
@@ -677,6 +682,7 @@ export function mountFl2vPanel(parent) {
     return {
         root: wrap,
         hint: wrap.querySelector(".bd-fl2v-hint"),
+        workbench: wrap.querySelector('[data-r="fl2v-workbench"]'),
         shotsEl: wrap.querySelector('[data-r="fl2v-shots"]'),
         detail: wrap.querySelector('[data-r="fl2v-detail"]'),
         prompt: wrap.querySelector('[data-r="fl2v-prompt"]'),
