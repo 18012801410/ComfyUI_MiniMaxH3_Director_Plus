@@ -405,7 +405,8 @@ const STYLES = `
 .bd-controls{width:100%;box-sizing:border-box;background:#151515;border:1px solid #222;border-radius:0 0 6px 6px;padding:8px 10px;margin-top:0;flex-shrink:0}
 .bd-stage.hidden+.bd-controls{border-radius:6px;border-color:#333;background:#1e1e1e}
 .bd-viewport{width:100%;min-width:100%;overflow-x:auto;border-radius:6px;border:1px solid #111;background:#2a2a2a;box-sizing:border-box;flex-shrink:0}
-.bd-canvas{display:block;width:100%;min-width:100%;cursor:pointer;box-sizing:border-box;flex-shrink:0;object-fit:fill}
+/* object-fit:fill + mismatched CSS/bitmap aspect stretches thumbs (esp. under graph zoom). */
+.bd-canvas{display:block;width:100%;min-width:100%;height:auto;cursor:pointer;box-sizing:border-box;flex-shrink:0;object-fit:fill}
 .bd-canvas.bd-grab{cursor:grab}
 .bd-canvas.bd-grabbing{cursor:grabbing}
 .bd-output{width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;background:#1e1e1e;border:1px solid #333;border-radius:6px}
@@ -472,8 +473,8 @@ const STYLES = `
 .bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col{gap:10px}
 .bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col .bd-prompt{min-height:160px;flex:1 1 auto}
 .bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live>.bd-prompt-col>.bd-live-sample{margin:0;padding:8px 10px;min-height:0;flex:0 0 auto;border-radius:10px}
-.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body{min-height:110px;max-height:160px}
-.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body img{max-height:160px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body{min-height:180px;max-height:280px}
+.bd-prompt-layout.bd-rv2v-layout.bd-rv2v-with-live .bd-live-sample-body img{width:100%;max-height:280px;object-fit:contain}
 .bd-prompt-layout.bd-v2v-layout{grid-template-columns:1fr;gap:0}
 .bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live{grid-template-columns:minmax(0,1.25fr) minmax(240px,.9fr);gap:12px;align-items:stretch}
 .bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-prompt-col{order:1;min-height:220px}
@@ -1148,6 +1149,8 @@ class MiniMaxH3DirectorEditor {
         this._syncTimer = null;
         this._resizeRaf = null;
         this._renderPending = false;
+        this._settleRenderTimer = null;
+        this._settleRenderLateTimer = null;
         this._lastSeekUiMs = 0;
         this._playCanvasWidth = 0;
         this._pauseSettling = false;
@@ -1200,17 +1203,60 @@ class MiniMaxH3DirectorEditor {
         this.updateSelectionUI();
         this.commit(true, { syncTimeline: false });
         this._observeViewportResize();
-        this.scheduleRender();
+        this.scheduleSettleRender();
     }
 
     _observeViewportResize() {
         if (!this.viewport || typeof ResizeObserver === "undefined") return;
         this._resizeObserver?.disconnect();
         this._resizeObserver = new ResizeObserver(() => {
-            if (this.isPlaying) return;
+            if (this.isPlaying || this._pauseSettling) return;
             this.scheduleRender();
         });
         this._resizeObserver.observe(this.viewport);
+        if (this.container && this.container !== this.viewport) {
+            this._resizeObserver.observe(this.container);
+        }
+    }
+
+    /**
+     * CSS layout width for the timeline bitmap.
+     * Must NOT use getBoundingClientRect — ComfyUI graph zoom transforms inflate/deflate
+     * that value while width:100% still follows clientWidth, and object-fit:fill then
+     * stretches segment thumbnails.
+     */
+    _measureDrawWidth() {
+        if (this.isPlaying && this._playCanvasWidth > 0) return this._playCanvasWidth;
+        if (this.zoom > 1) {
+            const zoomed = this.canvas?.clientWidth || this.canvas?.offsetWidth || 0;
+            if (zoomed > 0) return zoomed;
+        }
+        return this.viewport?.clientWidth
+            || this.canvas?.clientWidth
+            || this.canvas?.offsetWidth
+            || this.container?.clientWidth
+            || this.root?.clientWidth
+            || 0;
+    }
+
+    /** Redraw after layout/zoom settles (first mount often measures before the node finishes sizing). */
+    scheduleSettleRender() {
+        this.scheduleRender();
+        if (this._settleRenderTimer != null) return;
+        this._settleRenderTimer = setTimeout(() => {
+            this._settleRenderTimer = null;
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    if (!this.isPlaying) this.scheduleRender();
+                });
+            });
+        }, 0);
+        // Extra pass after ComfyUI node size / graph zoom finishes applying.
+        clearTimeout(this._settleRenderLateTimer);
+        this._settleRenderLateTimer = setTimeout(() => {
+            this._settleRenderLateTimer = null;
+            if (!this.isPlaying) this.scheduleRender();
+        }, 100);
     }
 
     _capturePlayCanvasWidth() {
@@ -2140,6 +2186,10 @@ class MiniMaxH3DirectorEditor {
 
     destroy() {
         clearTimeout(this._syncTimer);
+        clearTimeout(this._settleRenderTimer);
+        clearTimeout(this._settleRenderLateTimer);
+        this._settleRenderTimer = null;
+        this._settleRenderLateTimer = null;
         cancelAnimationFrame(this._resizeRaf);
         cancelAnimationFrame(this._playRaf);
         this._resizeObserver?.disconnect();
@@ -5326,7 +5376,7 @@ class MiniMaxH3DirectorEditor {
         if (this.isPlaying || this._pauseSettling) return;
         this._resetLayoutStyles();
         this.applyZoomWidth();
-        this.scheduleRender();
+        this.scheduleSettleRender();
     }
 
     applyZoomWidth() {
@@ -5350,11 +5400,7 @@ class MiniMaxH3DirectorEditor {
     xToFrame(x, width) { return clamp(Math.round((x / width) * this.getTotalFrames()), 0, this.getTotalFrames()); }
 
     getLayoutWidth() {
-        return this._drawWidth
-            || this.canvas?.getBoundingClientRect().width
-            || this.canvas?.offsetWidth
-            || this.viewport?.clientWidth
-            || 0;
+        return this._drawWidth || this._measureDrawWidth();
     }
 
     getMousePos(e) {
@@ -6603,8 +6649,12 @@ class MiniMaxH3DirectorEditor {
             this.renderTimelineOnly();
             return;
         }
-        const width = this.canvas?.getBoundingClientRect().width || this.canvas?.offsetWidth || 0;
-        if (!width) return;
+        const width = this._measureDrawWidth();
+        if (!width) {
+            // Host not laid out yet — retry after the next layout pass.
+            this.scheduleSettleRender();
+            return;
+        }
         this._drawWidth = width;
         this._drawTimelineCanvas(width);
         this._updateTimelineDom();
@@ -6612,10 +6662,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     renderTimelineOnly() {
-        const width = this._playCanvasWidth
-            || this.viewport?.clientWidth
-            || this.canvas?.getBoundingClientRect().width
-            || this.canvas?.offsetWidth
+        const width = this._measureDrawWidth()
             || this.node?.size?.[0]
             || 0;
         if (!width) return;
@@ -6629,11 +6676,16 @@ class MiniMaxH3DirectorEditor {
         const dpr = window.devicePixelRatio || 1;
         const bw = Math.round(width * dpr);
         const bh = Math.round(height * dpr);
-        // Keep bitmap ↔ CSS aspect in lockstep. During run, flex layout can
-        // squash the canvas box; mismatched CSS height makes thumbs look stretched.
+        // Keep bitmap ↔ CSS aspect in lockstep. Mixing getBoundingClientRect (graph-zoom
+        // transformed) with width:100% clientWidth used to squash/stretch thumbs.
         if (this.canvas.width !== bw || this.canvas.height !== bh) {
             this.canvas.width = bw;
             this.canvas.height = bh;
+        }
+        if (this.zoom > 1) {
+            this.canvas.style.width = `${Math.round(width)}px`;
+        } else if (this.canvas.style.width !== "100%") {
+            this.canvas.style.width = "100%";
         }
         this.canvas.style.height = `${height}px`;
         this.canvas.style.maxHeight = `${height}px`;
@@ -8269,7 +8321,9 @@ app.registerExtension({
         nodeType.prototype.onSelected = function () {
             ensureDirectorDomWidgetWidth(this);
             const out = onSelected?.apply(this, arguments);
-            this._minimaxEditor?.scheduleRender?.();
+            // Reselect often lands after graph zoom/layout changes — settle redraw
+            // fixes thumbs that were stretched from a mismatched canvas CSS box.
+            this._minimaxEditor?.scheduleSettleRender?.();
             return out;
         };
 
@@ -8312,6 +8366,7 @@ app.registerExtension({
                 ed.selectedIndex = 0;
                 ed.updateSelectionUI();
                 ed.commit(true, { syncTimeline: false });
+                ed.scheduleSettleRender?.();
             }, 80);
             return out;
         };

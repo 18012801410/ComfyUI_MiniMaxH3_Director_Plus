@@ -182,6 +182,16 @@ def x0_to_preview_pil(x0: Any, *, max_side: int = 512) -> Image.Image | None:
     if pil is None:
         return None
 
+    # Latent2RGB frames are often tiny (latent spatial size); upscale so UI
+    # preview slots are not a speck in a large card.
+    min_side = 256
+    longest = max(int(pil.width), int(pil.height))
+    if longest > 0 and longest < min_side:
+        scale = min_side / float(longest)
+        pil = pil.resize(
+            (max(1, int(round(pil.width * scale))), max(1, int(round(pil.height * scale)))),
+            Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST,
+        )
     if max_side and max_side > 0 and (pil.width > max_side or pil.height > max_side):
         pil = ImageOps.contain(pil, (max_side, max_side), Image.LANCZOS)
     return pil
