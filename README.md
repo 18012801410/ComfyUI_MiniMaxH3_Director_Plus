@@ -16,16 +16,18 @@
 |------|------|
 | **多段时间轴** | 节点内上传视频，支持切分、均分、智能分镜分割（PySceneDetect）、追加；分割点可选中删除；可视化时间轴预览每段范围与缩略图 |
 | **多任务模式** | `task_type`：`t2v`（文生视频）、`i2v`（图生视频）、`fl2v`（首尾帧生视频）、`r2v`（参考主体生视频 / 素材组）、`v2v`（视频转视频）、`rv2v`（参考素材改视频） |
-| **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」上传首帧（必传）与尾帧（可选）；拖缘调时长；提示词写中间运动；支持「选择运行」只跑部分组 |
+| **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」上传首帧和/或尾帧（官方支持只传尾帧）；拖缘调时长；提示词写中间运动；支持「选择运行」只跑部分组 |
 | **参考素材组 (r2v)** | fl2v 式分组 UI：每组图片1–9 / 音频1–3 / 视频1–3；提示词用 `<Picture N>` / `<Video K>` / `<Audio J>`（或 `@` 引用）；时间轴预览与选中状态同步 |
 | **源视频编辑 (v2v / rv2v)** | Bernini 风格源视频时间轴；每段源画面自动绑定 `<Video 1>`；`rv2v` 另可挂参考图（图片1–9）与参考音频（音频1–3） |
 | **选择运行** | 开启后只采样勾选的片段/素材组；未勾选段可用缓存或源画面填充（全部导出时） |
+| **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
 
 ### 输入 / 输出
 
-**输入：** `model` → `video_vae` → `audio_vae` → `clip`
+**输入：** `model` → `video_vae` → `audio_vae` → `clip`  
+**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）
 
 **输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
 
@@ -80,6 +82,8 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 | `minimax_h3_director_r2v.json` | r2v | **ref2va** | 参考改视频素材组 |
 | `minimax_h3_director_v2v.json` | v2v | **ref2va** | 源视频时间轴编辑 |
 | `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | 源视频 + 参考图/音频 |
+| `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group×2 → Combine → `i2v_groups` |
+| `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group×N → Combine → `r2v_groups` |
 
 ### 推荐模型文件
 
@@ -108,7 +112,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 ### 首尾帧 fl2v 用法摘要
 
 1. 任务类型选 **「首尾帧生视频 (fl2v)」**
-2. 点击「添加一组」，上传首帧（必传）与尾帧（可选）
+2. 点击「添加一组」，上传首帧和/或尾帧（可只传尾帧）
 3. 在镜卡片或时间轴上调整时长；提示词写中间运动 / 镜头 / 过渡
 4. Queue 生成；多组可勾选「选择运行」只跑部分组
 
@@ -124,6 +128,16 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 1. 选 **v2v** 或 **rv2v**，上传源视频并分段（切分 / 均分 / 智能分割）
 2. 每段写提示词；系统自动将源片段绑定为 `<Video 1>`
 3. `rv2v` 可额外上传参考图 / 参考音频；声音模式可选生成 / 原声 / 静音
+
+### 外部多组接线（第三方节点接入）
+
+对齐官网两个 conditioning 节点，把扩写 / 抠图 / Load Video 等处理结果以**多组**形式送进导演台：
+
+1. 添加 **`MiniMax H3 Director Group (Image to Video)`** 或 **`(Reference to Video)`**
+2. 按组接线：`prompt` / `duration_sec`；I2V 系接 `first_frame` / `last_frame`（无帧=t2v，仅首=i2v，仅尾或首+尾=fl2v）；R2V 为 Autogrow（同官方 Reference to Video）：接图/视频/音频会自动多出空口（图≤9、视频≤3、音频≤3）。输出宽高在**导演台**统一设置
+3. 多组：用 **`Director Groups Combine`**（Autogrow：接满最后一个口会自动多出新口，同官方 Reference to Video）→ 导演台 `i2v_groups` / `r2v_groups`；单组可直接把 `group` 连到导演台
+4. 导演台 `task_type` 与口一致（t2v/i2v/fl2v ↔ `i2v_groups`；r2v ↔ `r2v_groups`）；**不要两口同时连接**
+5. 连接后执行以图中接线为准（外部优先）；UI 卡片变淡，仍可用「选择运行」按组序勾选
 
 ## 配套生态 · [Comfyit 搅拌站](https://comfyit.cn/)
 

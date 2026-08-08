@@ -28,12 +28,19 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
         return seg.source_clip.clone()
 
+    # Pure t2v (incl. external groups) has no source frames.
+    if getattr(seg, "task_key", "") == "t2v":
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+
     sv = plan.source_video
     if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
         start = max(0, int(seg.start_frame))
         end = min(int(seg.end_frame), int(sv.shape[0]))
         if end > start:
             return sv[start:end].clone()
+
+    if (plan.raw or {}).get("externalGroups", {}).get("active"):
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     return load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
 

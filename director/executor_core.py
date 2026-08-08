@@ -103,6 +103,7 @@ def _build_minimax_inputs(
     ref_images = None
     ref_videos = None
     ref_audios = None
+    ref_video_audios = None
 
     if task_key == "fl2v":
         if clip_frames is not None and clip_frames.shape[0] >= 1:
@@ -138,6 +139,7 @@ def _build_minimax_inputs(
             if ref_video is not None and ref_video.shape[0] > 0:
                 ref_videos = {"ref_video_0": ref_video}
         ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
+        ref_video_audios = _ref_video_audios_to_dict(getattr(seg, "ref_video_audios", None) or [])
     elif task_key in {"v2v", "rv2v"}:
         # Bernini-style video edit: each timeline segment's source clip → <Video 1>.
         # rv2v additionally injects 图片1–9 / 音频1–3 as <Picture N> / <Audio J>.
@@ -161,7 +163,18 @@ def _build_minimax_inputs(
                 ref_images = None
             ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
 
-    return first_frame, last_frame, ref_images, ref_videos, ref_audios
+    return first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios
+
+
+def _ref_video_audios_to_dict(items) -> dict | None:
+    out: dict = {}
+    for item in items or []:
+        idx = int(getattr(item, "index", -1))
+        audio = getattr(item, "audio", None)
+        if idx < 0 or not isinstance(audio, dict) or audio.get("waveform") is None:
+            continue
+        out[f"ref_video_audio_{idx}"] = audio
+    return out or None
 
 
 def execute_director_plan_core(
@@ -196,6 +209,14 @@ def execute_director_plan_core(
     seg_total = len(run_list)
     progress_pos = {idx: pos for pos, idx in enumerate(run_list)}
     passthrough_indices: list[int] = []
+    # External groups may compact selected packs to 0..N-1 while UI still shows
+    # the full group list — prefer original timeline card count for progress UI.
+    ext_meta = (plan.raw or {}).get("externalGroups") or {}
+    try:
+        timeline_seg_total = int(ext_meta.get("count") or 0) or len(all_segments)
+    except (TypeError, ValueError):
+        timeline_seg_total = len(all_segments)
+    timeline_seg_total = max(timeline_seg_total, len(all_segments))
 
     output_chunks: list[torch.Tensor] = []
     segment_outputs: list[torch.Tensor] = []
@@ -209,7 +230,16 @@ def execute_director_plan_core(
         reports.append("Audio: source — skip audio VAE decode, use original timeline audio.")
     else:
         reports.append("Audio: generate — decode MiniMax H3 AV latent audio.")
-    if plan.run_indices is not None:
+    selected_ui = ext_meta.get("selected")
+    if selected_ui is not None:
+        selected_set = {int(x) for x in selected_ui}
+        run_ui = [i + 1 for i in sorted(selected_set)]
+        skipped = [i + 1 for i in range(timeline_seg_total) if i not in selected_set]
+        reports.append(
+            f"Run selection: {len(run_list)}/{timeline_seg_total} segment(s) "
+            f"(indices {run_ui}; skipped {skipped or 'none'})"
+        )
+    elif plan.run_indices is not None:
         skipped = [i + 1 for i in range(len(all_segments)) if i not in run_indices]
         reports.append(
             f"Run selection: {len(run_list)}/{len(all_segments)} segment(s) "
@@ -232,11 +262,12 @@ def execute_director_plan_core(
                 f"Supported: {', '.join(sorted(SUPPORTED_TASK_KEYS))}."
             )
 
+        ui_idx = seg.timeline_index
         meta = {
             "frames_label": frames_label(seg),
             "task_key": seg.task_key,
-            "timeline_segment_index": seg.index,
-            "timeline_segment_total": len(all_segments),
+            "timeline_segment_index": ui_idx,
+            "timeline_segment_total": timeline_seg_total,
         }
 
         report_director_progress(
@@ -286,10 +317,17 @@ def execute_director_plan_core(
         if seg.task_key == "fl2v":
             from .fl2v_timeline import reinforce_fl2v_prompt
 
+            has_start = any(getattr(r, "index", None) == 0 for r in (seg.refs or []))
             has_end = any(getattr(r, "index", None) == 1 for r in (seg.refs or []))
-            if not has_end and seg.refs:
+            if not has_start and not has_end and seg.refs:
+                # Legacy packs without explicit indices: [start] or [start, end].
+                has_start = True
                 has_end = len(seg.refs) >= 2
-            positive_prompt = reinforce_fl2v_prompt(positive_prompt, has_end_frame=has_end)
+            positive_prompt = reinforce_fl2v_prompt(
+                positive_prompt,
+                has_end_frame=has_end,
+                has_start_frame=has_start,
+            )
         elif seg.task_key == "r2v":
             ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
             vid_idxs = [int(getattr(v, "index", 0)) for v in (getattr(seg, "ref_videos", None) or []) if v is not None]
@@ -314,11 +352,13 @@ def execute_director_plan_core(
             phase="context_encode", phase_value=0, phase_max=1, **meta,
         )
 
-        first_frame, last_frame, ref_images, ref_videos, ref_audios = _build_minimax_inputs(
+        first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios = _build_minimax_inputs(
             plan, seg, clip_frames=clip_frames, ctx_w=ctx_w, ctx_h=ctx_h, prev_tail=prev_tail,
         )
 
-        if seg.task_key in {"r2v", "v2v", "rv2v"} and (ref_images or ref_videos or ref_audios) and audio_vae is None:
+        if seg.task_key in {"r2v", "v2v", "rv2v"} and (
+            ref_images or ref_videos or ref_audios or ref_video_audios
+        ) and audio_vae is None:
             raise ValueError("r2v/v2v/rv2v / reference conditioning requires audio_vae input.")
 
         positive, negative, latent, task_hint = run_minimax_conditioning(
@@ -334,6 +374,7 @@ def execute_director_plan_core(
             last_frame=last_frame,
             ref_images=ref_images,
             ref_videos=ref_videos,
+            ref_video_audios=ref_video_audios,
             ref_audios=ref_audios,
         )
 
@@ -361,7 +402,7 @@ def execute_director_plan_core(
                     return
                 report_director_segment_preview(
                     node_id,
-                    segment_index=seg.index,
+                    segment_index=ui_idx,
                     image_b64=pil_to_jpeg_b64(pil),
                     width=pil.width,
                     height=pil.height,
@@ -417,7 +458,7 @@ def execute_director_plan_core(
                 h, w = int(decoded.shape[1]), int(decoded.shape[2])
                 report_director_segment_preview(
                     node_id,
-                    segment_index=seg.index,
+                    segment_index=ui_idx,
                     image_b64=frames_b64[0],
                     width=w,
                     height=h,
@@ -431,12 +472,12 @@ def execute_director_plan_core(
             cleanup_segment_vram(enabled=True)
 
         reports.append(
-            f"Segment {seg.index + 1}/{len(all_segments)}: {task_hint} "
+            f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
             f"({target_len} frames, seed={seed})"
         )
         log.info(
             "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
-            seg.index + 1, len(all_segments), target_len, seg.task_key,
+            ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
         return chunk, audio_dict
 

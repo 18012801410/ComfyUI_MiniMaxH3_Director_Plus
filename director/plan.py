@@ -79,14 +79,23 @@ class SegmentPlan:
     refs: list[SegmentRef] = field(default_factory=list)
     ref_audios: list[SegmentRefAudio] = field(default_factory=list)
     ref_videos: list[SegmentRefVideo] = field(default_factory=list)
+    ref_video_audios: list[SegmentRefAudio] = field(default_factory=list)
     reference_video_meta: dict = field(default_factory=dict)
     reference_video_start_frame: int = 0
     negative_prompt: str = ""
     source_clip: torch.Tensor | None = None
+    # When external groups filter by「选择运行」, plan.index is the compact run
+    # order (0..N-1) while ui_index keeps the Director timeline card index.
+    ui_index: int | None = None
 
     @property
     def frame_count(self) -> int:
         return max(0, self.end_frame - self.start_frame)
+
+    @property
+    def timeline_index(self) -> int:
+        """Index used for UI preview / highlight (timeline card)."""
+        return int(self.index if self.ui_index is None else self.ui_index)
 
 
 @dataclass

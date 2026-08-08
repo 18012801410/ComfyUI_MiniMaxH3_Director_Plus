@@ -9,6 +9,11 @@ from .nodes.conditioning import (
     MiniMaxH3DirectorPlannerConditioning,
 )
 from .nodes.director import MiniMaxH3Director
+from .nodes.director_groups import (
+    MiniMaxH3DirectorGroupImageToVideo,
+    MiniMaxH3DirectorGroupReferenceToVideo,
+    MiniMaxH3DirectorGroupsCombine,
+)
 
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3Director": MiniMaxH3Director,
@@ -16,6 +21,11 @@ NODE_CLASS_MAPPINGS = {
     "ComfyMiniMaxH3Director": MiniMaxH3Director,
     "MiniMaxH3DirectorConditioning": MiniMaxH3DirectorConditioning,
     "MiniMaxH3DirectorPlannerConditioning": MiniMaxH3DirectorPlannerConditioning,
+    "MiniMaxH3DirectorGroupImageToVideo": MiniMaxH3DirectorGroupImageToVideo,
+    "MiniMaxH3DirectorGroupReferenceToVideo": MiniMaxH3DirectorGroupReferenceToVideo,
+    # Must stay in NODE_CLASS_MAPPINGS: ComfyUI skips comfy_entrypoint when
+    # NODE_CLASS_MAPPINGS is present (if/elif in load_custom_node).
+    "MiniMaxH3DirectorGroupsCombine": MiniMaxH3DirectorGroupsCombine,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -23,6 +33,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ComfyMiniMaxH3Director": "MiniMaxH3Director",
     "MiniMaxH3DirectorConditioning": "MiniMax H3 Director Conditioning",
     "MiniMaxH3DirectorPlannerConditioning": "MiniMax H3 Director Planner Conditioning",
+    "MiniMaxH3DirectorGroupImageToVideo": "MiniMax H3 Director Group (Image to Video)",
+    "MiniMaxH3DirectorGroupReferenceToVideo": "MiniMax H3 Director Group (Reference to Video)",
+    "MiniMaxH3DirectorGroupsCombine": "MiniMax H3 Director Groups Combine",
 }
 
 WEB_DIRECTORY = "./web/js"

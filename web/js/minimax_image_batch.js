@@ -227,6 +227,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none}
 .bd-batch-run-all.hidden{display:none!important}
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
+/* max-height must stay in sync with BATCH_LIST_MAX_H in getImageBatchUiHeight(). */
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
@@ -313,6 +314,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-r2v .bd-batch-video .bd-r2v-meta,.bd-batch-r2v .bd-batch-audio .bd-r2v-meta{flex-direction:row;align-items:center;justify-content:space-between;gap:4px}
 .bd-r2v-meta .tag{color:#cfcfcf;font-size:11px;font-weight:650}
 .bd-r2v-dur{flex-shrink:0;min-width:2.6em;text-align:right;font-size:11px;color:#8a9;font-variant-numeric:tabular-nums}
+.bd-r2v-paired-audio{flex-shrink:0;color:#7dbaff;font-size:12px;line-height:1;padding:0 2px}
 .bd-batch-r2v .bd-batch-audio .name,.bd-batch-r2v .bd-batch-video .name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8aa;font-size:10px;padding:0}
 .bd-batch-r2v .bd-batch-video.has-video .name,.bd-batch-r2v .bd-batch-audio.has-audio .name{display:none}
 .bd-batch-r2v .bd-batch-video:not(.has-video) .name,.bd-batch-r2v .bd-batch-audio:not(.has-audio) .name{display:block;color:#666}
@@ -596,6 +598,7 @@ export function normalizeImageBatchSegments(editor) {
 }
 
 export function addImageBatchGroup(editor) {
+    if (editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.()) return;
     const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     editor.timeline.segments.push(newBatchSegment({
         durationSec: defaultDurationSec(taskKey),
@@ -610,6 +613,7 @@ export function addImageBatchGroup(editor) {
 }
 
 export function deleteImageBatchGroup(editor, index) {
+    if (editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.()) return;
     if (editor.timeline.segments.length <= 1) return;
     editor.timeline.segments.splice(index, 1);
     normalizeImageBatchSegments(editor);
@@ -865,7 +869,11 @@ function countFilledRefs(seg) {
         const idx = Number(r.index ?? r.slot);
         if (r?.imageFile && Number.isFinite(idx) && idx >= 0 && idx < R2V_PICTURE_SLOTS) imgs += 1;
     }
-    for (const r of seg.refVideos || []) if (r?.videoFile || r?.fileName) videos += 1;
+    for (const r of seg.refVideos || []) {
+        if (r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked) {
+            videos += 1;
+        }
+    }
     for (const r of seg.refAudios || []) if (r?.audioFile || r?.fileName) audios += 1;
     return { imgs, videos, audios };
 }
@@ -962,10 +970,14 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
 
 function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refVideoLabel(slot);
-    const file = ref?.videoFile || ref?.fileName || "";
-    el.className = `bd-batch-video${file ? " has-video" : ""}`;
-    el.title = file
-        ? t("ref.videoTitleFilled", { label, file })
+    const file = ref?.videoFile || "";
+    const posterSrc = ref?.previewImageUrl
+        || (ref?.previewImageFile ? viewUrl(ref.previewImageFile) : "");
+    const hasMedia = !!(file || posterSrc || ref?.linked);
+    const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
+    el.className = `bd-batch-video${hasMedia ? " has-video" : ""}`;
+    el.title = hasMedia
+        ? t("ref.videoTitleFilled", { label, file: titleFile || label })
         : t("ref.videoTitleEmpty", { label });
     el.innerHTML = "";
     if (r2v) {
@@ -1011,11 +1023,42 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
                     try { video.currentTime = Math.min(0.1, (video.duration || 1) * 0.05); } catch (_) { /* ignore */ }
                 }
             }, { once: true });
+            if (ref?.pairedAudioFile) {
+                const audioBadge = document.createElement("span");
+                audioBadge.className = "bd-r2v-paired-audio";
+                audioBadge.title = ref.pairedAudioFile;
+                audioBadge.textContent = "♪";
+                meta.appendChild(audioBadge);
+            }
             const x = document.createElement("span");
             x.className = "x";
             x.textContent = "×";
             x.onclick = (e) => { e.stopPropagation(); removeSegVideo(editor, index, slot); };
             el.appendChild(x);
+        } else if (posterSrc) {
+            // External IMAGE-batch video: show upstream first-frame poster (no file path).
+            const img = document.createElement("img");
+            img.className = "bd-r2v-media";
+            img.src = posterSrc;
+            img.alt = label;
+            thumb.appendChild(img);
+            const hint = document.createElement("span");
+            hint.className = "name";
+            hint.textContent = t("batch.r2v.externalPoster");
+            meta.appendChild(hint);
+            if (ref?.pairedAudioFile) {
+                const audioBadge = document.createElement("span");
+                audioBadge.className = "bd-r2v-paired-audio";
+                audioBadge.title = ref.pairedAudioFile;
+                audioBadge.textContent = "♪";
+                meta.appendChild(audioBadge);
+            }
+        } else if (ref?.linked) {
+            thumb.textContent = "▶";
+            const hint = document.createElement("span");
+            hint.className = "name";
+            hint.textContent = t("batch.r2v.externalLinked");
+            meta.appendChild(hint);
         } else {
             thumb.textContent = "▶";
             const hint = document.createElement("span");
@@ -1408,14 +1451,19 @@ export function renderImageBatchGroups(editor) {
             ? t(hintKey)
             : t(isVideo ? "batch.hint.defaultVideo" : "batch.hint.defaultImage");
     }
+    const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     if (editor.batchI2vNotice) {
         const needsRefs = key === "r2i" || key === "r2v";
         const hasAnyMedia = (editor.timeline.segments || []).some((s) => (
-            (s.refs || []).length > 0
-            || (s.refAudios || []).length > 0
-            || (s.refVideos || []).length > 0
+            (s.refs || []).some((r) => r?.imageFile)
+            || (s.refAudios || []).some((r) => r?.audioFile || r?.fileName)
+            || (s.refVideos || []).some((r) => (
+                r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked
+            ))
         ));
-        if (needsRefs && !hasAnyMedia) {
+        // External graph media may exist as tensors even when UI path sync failed —
+        // don't scare users with a false "will degrade to t2v" notice.
+        if (needsRefs && !hasAnyMedia && !externalLocked) {
             editor.batchI2vNotice.textContent = t(key === "r2v" ? "batch.notice.r2vNoRefs" : "batch.notice.r2iNoRefs");
             editor.batchI2vNotice.classList.add("visible");
         } else {
@@ -1428,7 +1476,9 @@ export function renderImageBatchGroups(editor) {
         addBtn.textContent = t(key === "r2v" ? "batch.addRefGroup" : "batch.addPromptGroup");
         addBtn.setAttribute("data-i18n", key === "r2v" ? "batch.addRefGroup" : "batch.addPromptGroup");
         // r2v: add from toolbar (left of task select), like fl2v.
-        addBtn.classList.toggle("hidden", key === "r2v");
+        // External groups: never add UI cards (graph is source of truth).
+        addBtn.classList.toggle("hidden", key === "r2v" || externalLocked);
+        addBtn.disabled = externalLocked;
     }
 
     list.innerHTML = "";
@@ -1512,25 +1562,33 @@ export function renderImageBatchGroups(editor) {
                     editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
                 }
             };
-            secInput.onchange = applySec;
-            secInput.oninput = () => {
-                clearTimeout(secInput._t);
-                secInput._t = setTimeout(applySec, 200);
-            };
-            secInput.onblur = () => {
-                clearTimeout(secInput._t);
-                secInput._t = null;
-                applySec();
-            };
+            if (externalLocked) {
+                secInput.readOnly = true;
+                secInput.disabled = true;
+                secInput.title = t("external.durationLocked");
+            } else {
+                secInput.onchange = applySec;
+                secInput.oninput = () => {
+                    clearTimeout(secInput._t);
+                    secInput._t = setTimeout(applySec, 200);
+                };
+                secInput.onblur = () => {
+                    clearTimeout(secInput._t);
+                    secInput._t = null;
+                    applySec();
+                };
+            }
             meta.appendChild(secRow);
         }
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "bd-batch-del";
-        del.textContent = t("batch.delete");
-        del.disabled = editor.timeline.segments.length <= 1;
-        del.onclick = (e) => { e.stopPropagation(); deleteImageBatchGroup(editor, index); };
-        meta.appendChild(del);
+        if (!externalLocked) {
+            const del = document.createElement("button");
+            del.type = "button";
+            del.className = "bd-batch-del";
+            del.textContent = t("batch.delete");
+            del.disabled = editor.timeline.segments.length <= 1;
+            del.onclick = (e) => { e.stopPropagation(); deleteImageBatchGroup(editor, index); };
+            meta.appendChild(del);
+        }
         head.appendChild(meta);
         card.appendChild(head);
 
@@ -1607,6 +1665,8 @@ export function renderImageBatchGroups(editor) {
 
         list.appendChild(card);
     });
+    // Batch list is scroll-capped; refresh node/widget height after card count changes.
+    editor.updateDomWidgetHeight?.();
 }
 
 export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {}) {
@@ -1663,12 +1723,21 @@ export function bindImageBatchEvents(editor) {
     });
 }
 
+/** Keep in sync with `.bd-batch-list { max-height: 640px }` above. */
+const BATCH_LIST_MAX_H = 640;
+const BATCH_LIST_GAP = 8;
+const BATCH_TOOLBAR_H = 48;
+const BATCH_PANEL_CHROME = 28;
+
 export function getImageBatchUiHeight(editor) {
     const n = Math.max(1, editor?.timeline?.segments?.length || 1);
     const key = resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value);
-    // r2v: left 3×3 assets + right tall prompt/preview.
+    // r2v cards are tall; list scrolls inside BATCH_LIST_MAX_H — do NOT sum full card
+    // heights into node size or the DOM widget grows a huge empty region below.
     const rowH = key === "r2v" ? 420 : (isVideoBatchTask(key) ? 155 : 130);
-    return 200 + Math.min(n, 4) * rowH + 60;
+    const listContentH = n * rowH + Math.max(0, n - 1) * BATCH_LIST_GAP;
+    const listH = Math.min(listContentH, BATCH_LIST_MAX_H);
+    return BATCH_TOOLBAR_H + BATCH_PANEL_CHROME + listH;
 }
 
 export function setToolbarDisabledForBatch(editor, disabled) {
@@ -1723,31 +1792,38 @@ export function setR2vToolbar(editor, enabled) {
     editor.root?.querySelector('[data-r="equal-n"]')?.classList.toggle("hidden", enabled);
     editor.root?.querySelector(".bd-mode")?.classList.toggle("hidden", enabled);
 
+    const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     const del = editor.root?.querySelector('[data-a="del"]');
     if (del) {
-        del.disabled = false;
-        del.classList.remove("bd-disabled", "hidden");
-        del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
-        del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
-        del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
-        del.title = enabled
-            ? t("tooltip.deleteSelectedFl2vGroup")
-            : t("tooltip.deleteSegment");
+        if (externalLocked) {
+            del.classList.add("hidden");
+            del.disabled = true;
+        } else {
+            del.disabled = false;
+            del.classList.remove("bd-disabled", "hidden");
+            del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
+            del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
+            del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
+            del.title = enabled
+                ? t("tooltip.deleteSelectedFl2vGroup")
+                : t("tooltip.deleteSegment");
+        }
     }
     const addBtn = editor.root?.querySelector('[data-a="r2v-add-group"]');
     if (addBtn) {
-        addBtn.classList.toggle("hidden", !enabled);
-        addBtn.disabled = !enabled;
+        addBtn.classList.toggle("hidden", !enabled || externalLocked);
+        addBtn.disabled = !enabled || externalLocked;
     }
     const batchAdd = editor.batchPanel?.querySelector('[data-a="batch-add"]');
-    if (batchAdd) batchAdd.classList.toggle("hidden", enabled);
+    if (batchAdd) batchAdd.classList.toggle("hidden", enabled || externalLocked);
     updateR2vToolbarBtns(editor);
 }
 
 export function updateR2vToolbarBtns(editor) {
     const addBtn = editor?.root?.querySelector?.('[data-a="r2v-add-group"]');
     if (!addBtn) return;
-    const show = !!editor?.isR2vBatch?.();
+    const externalLocked = !!(editor?.hasExternalI2vGroups?.() || editor?.hasExternalR2vGroups?.());
+    const show = !!editor?.isR2vBatch?.() && !externalLocked;
     addBtn.classList.toggle("hidden", !show);
     addBtn.disabled = !show;
 }

@@ -17,16 +17,18 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 |---------|-------------|
 | **Multi-segment timeline** | Upload video in-node; split, equal-split, smart shot-split (PySceneDetect), append; selectable/deletable split points; visual timeline with thumbs |
 | **Task modes** | `t2v`, `i2v`, `fl2v` (first/last frame), `r2v` (reference material groups), `v2v` (video-to-video), `rv2v` (reference-guided source edit) |
-| **First/last frame (fl2v)** | Dedicated shot groups: add group → start frame required, end frame optional; drag edges for duration; run-select per group |
+| **First/last frame (fl2v)** | Dedicated shot groups: add group → start and/or end frame (official FL2VA allows end-only); drag edges for duration; run-select per group |
 | **Reference groups (r2v)** | fl2v-style groups: up to 9 images / 3 audios / 3 videos per group; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
 | **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
 | **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
+| **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
 | **Run report** | `report` output with plan and per-segment summary |
 
 ### Inputs / outputs
 
-**Inputs:** `model` → `video_vae` → `audio_vae` → `clip`
+**Inputs:** `model` → `video_vae` → `audio_vae` → `clip`  
+**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs)
 
 **Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
 
@@ -81,6 +83,8 @@ This repo ships examples under `example_workflows/`:
 | `minimax_h3_director_r2v.json` | r2v | **ref2va** | Reference material groups |
 | `minimax_h3_director_v2v.json` | v2v | **ref2va** | Source-video timeline edit |
 | `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | Source + reference images/audio |
+| `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | External Group×2 → Combine → `i2v_groups` |
+| `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | External Group×N → Combine → `r2v_groups` |
 
 ### Recommended model files
 
@@ -103,6 +107,16 @@ This repo ships examples under `example_workflows/`:
 - Canvas default **0.4MP 16:9 (864×480)**, **5s / 124** frames @ **24 fps** (17k+5 grid)
 - **25** steps, `res_multistep` + `simple`, CFG **1.0**
 - Sigma shift: video **12** / audio **3**
+
+### External multi-group wiring
+
+Mirror the two official conditioning nodes and feed **multi-group** batches into the Director:
+
+1. Add **`MiniMax H3 Director Group (Image to Video)`** or **`(Reference to Video)`**
+2. Wire per group: `prompt` / `duration_sec`; I2V family uses `first_frame` / `last_frame` (none=t2v, first only=i2v, last only or both=fl2v); R2V uses Autogrow slots (same as official Reference to Video: images ≤9, videos ≤3, audios ≤3). Output size is set on the **Director**
+3. Batch with **`Director Groups Combine`** (Autogrow slots, same UX as official Reference to Video) → Director `i2v_groups` / `r2v_groups`; a single `group` can connect to the Director directly
+4. Match `task_type` to the port; do not connect both ports at once
+5. When linked, graph wiring overrides UI cards (external priority); Run-select still applies by group index
 
 ## Ecosystem · [Comfyit](https://comfyit.cn/)
 

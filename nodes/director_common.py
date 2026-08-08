@@ -161,7 +161,14 @@ def prepare_director_plan(
     height: int,
     ref_max_size: int,
     unique_id: str | None,
+    i2v_groups=None,
+    r2v_groups=None,
 ):
+    from ..director.external_groups import (
+        build_plan_from_external_groups,
+        validate_external_group_inputs,
+    )
+
     if not timeline_data or not timeline_data.strip():
         timeline_data = default_timeline_json(
             task_type=task_type,
@@ -172,6 +179,39 @@ def prepare_director_plan(
             height=height,
             ref_max_size=ref_max_size,
         )
+
+    task_key, ext_groups, family = validate_external_group_inputs(
+        task_type=task_type,
+        i2v_groups=i2v_groups,
+        r2v_groups=r2v_groups,
+    )
+
+    if ext_groups is not None and family is not None:
+        report_director_planning(
+            unique_id,
+            len(ext_groups),
+            timeline_segment_total=len(ext_groups),
+        )
+        plan = build_plan_from_external_groups(
+            ext_groups,
+            family=family,
+            timeline_data=timeline_data,
+            task_type=task_type,
+            global_prompt=global_prompt,
+            total_frames=total_frames,
+            frame_rate=frame_rate,
+            width=width,
+            height=height,
+            ref_max_size=ref_max_size,
+        )
+        log.info(
+            "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
+            family,
+            len(ext_groups),
+            task_key,
+            plan_summary(plan).replace("\n", " | "),
+        )
+        return plan
 
     report_director_planning(
         unique_id,

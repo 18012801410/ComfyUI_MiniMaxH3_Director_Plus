@@ -1,6 +1,6 @@
 ﻿/**
  * First/last-frame (fl2v) timeline — explicit shot groups.
- * Each shot = { startImage (required to run), endImage (optional → i2v), durationSec }.
+ * Each shot = { startImage and/or endImage (official allows end-only), durationSec }.
  * Total duration = sum of shot durations. Timeline shows one block per shot.
  */
 
@@ -260,11 +260,11 @@ export function flattenFl2vShotsToSegments(editor) {
             isEndFrame: !!endImage?.imageFile,
             shotIndex: i,
             genImage: {
-                imageFile: startImage?.imageFile || "",
-                width: startImage?.width || 0,
-                height: startImage?.height || 0,
+                imageFile: startImage?.imageFile || endImage?.imageFile || "",
+                width: startImage?.width || endImage?.width || 0,
+                height: startImage?.height || endImage?.height || 0,
             },
-            imageFile: startImage?.imageFile || "",
+            imageFile: startImage?.imageFile || endImage?.imageFile || "",
             endImage: endImage
                 ? {
                     imageFile: endImage.imageFile || "",
@@ -1030,7 +1030,11 @@ function renderFl2vShotCards(editor) {
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
         const fc = shotFrameCount(shot, fl2vFps(editor));
-        const badge = shot.endImage?.imageFile ? t("fl2v.badge.startEnd") : t("fl2v.badge.i2v");
+        const badge = shot.startImage?.imageFile && shot.endImage?.imageFile
+            ? t("fl2v.badge.startEnd")
+            : (shot.endImage?.imageFile && !shot.startImage?.imageFile
+                ? t("fl2v.badge.startEnd")
+                : t("fl2v.badge.i2v"));
         card.innerHTML = `
             <div class="bd-fl2v-shot-head">
                 <b>${t("panel.fl2v.shotN", { n: i + 1 })}</b>
@@ -1255,7 +1259,10 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
     ctx.fillStyle = "#0d0d0d";
     ctx.fillRect(startX, y0 + 1, pxWidth, h - 2);
 
-    const imageFile = seg.genImage?.imageFile || seg.imageFile || "";
+    const imageFile = seg.genImage?.imageFile
+        || seg.imageFile
+        || seg.endImage?.imageFile
+        || "";
     if (!imageFile) {
         ctx.fillStyle = "#666";
         ctx.font = "12px sans-serif";
@@ -1444,15 +1451,21 @@ export function setFl2vToolbar(editor, enabled) {
         editor.btnVideo.classList.toggle("hidden", enabled);
         editor.btnVideo.disabled = enabled;
     }
+    const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     const del = editor.root?.querySelector('[data-a="del"]');
     if (del) {
-        del.disabled = false;
-        del.classList.remove("bd-disabled", "hidden");
-        del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
-        del.title = enabled ? t("tooltip.deleteSelectedFl2vGroup") : t("tooltip.deleteSegment");
-        // Keep data-i18n in sync when locale refreshes static attrs later.
-        del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
-        del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
+        if (externalLocked) {
+            del.classList.add("hidden");
+            del.disabled = true;
+        } else {
+            del.disabled = false;
+            del.classList.remove("bd-disabled", "hidden");
+            del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
+            del.title = enabled ? t("tooltip.deleteSelectedFl2vGroup") : t("tooltip.deleteSegment");
+            // Keep data-i18n in sync when locale refreshes static attrs later.
+            del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
+            del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
+        }
     }
     for (const sel of ['[data-a="fl2v-insert-before"]', '[data-a="fl2v-insert-after"]', '[data-a="fl2v-replace"]']) {
         const btn = editor.root?.querySelector(sel);
@@ -1463,8 +1476,8 @@ export function setFl2vToolbar(editor, enabled) {
     }
     const addBtn = editor.root?.querySelector('[data-a="fl2v-add-shot"]');
     if (addBtn) {
-        addBtn.classList.toggle("hidden", !enabled);
-        addBtn.disabled = !enabled;
+        addBtn.classList.toggle("hidden", !enabled || externalLocked);
+        addBtn.disabled = !enabled || externalLocked;
     }
     updateFl2vToolbarBtns(editor);
 }
@@ -1472,7 +1485,8 @@ export function setFl2vToolbar(editor, enabled) {
 export function updateFl2vToolbarBtns(editor) {
     const addBtn = editor?.root?.querySelector?.('[data-a="fl2v-add-shot"]');
     if (addBtn) {
-        const show = !!editor?.isFl2vMode?.();
+        const externalLocked = !!(editor?.hasExternalI2vGroups?.() || editor?.hasExternalR2vGroups?.());
+        const show = !!editor?.isFl2vMode?.() && !externalLocked;
         addBtn.classList.toggle("hidden", !show);
         addBtn.disabled = !show;
     }

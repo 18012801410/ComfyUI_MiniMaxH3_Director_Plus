@@ -4,6 +4,7 @@ import {
     CUSTOM_ASPECT_RATIO,
     DEFAULT_ASPECT_RATIO,
     DEFAULT_MEGAPIXELS,
+    defaultDurationSec,
     defaultFrameCount,
     durationToClampedMiniMaxFrames,
     framesToDurationSec,
@@ -69,6 +70,7 @@ import {
     removeFl2vShot,
     rippleFl2vRightEdge,
     mountFl2vPanel,
+    newFl2vShot,
     normalizeFl2vSegments,
     openFl2vUpload,
     setFl2vToolbar,
@@ -177,6 +179,10 @@ function sanitizeRefVideo(ref) {
         type: ref.type || "input",
         subfolder: ref.subfolder || "",
         durationSec: ref.durationSec,
+        pairedAudioFile: ref.pairedAudioFile || "",
+        previewImageFile: ref.previewImageFile || "",
+        previewImageUrl: ref.previewImageUrl || "",
+        linked: !!ref.linked || !!(ref.videoFile || ref.previewImageFile || ref.previewImageUrl),
     };
 }
 
@@ -371,8 +377,9 @@ function makeGroupHeaderWidget(inputName, inputData) {
 
 const STYLES = `
 .mmx-host{width:100%;box-sizing:border-box;display:block}
-.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px)}
-.bd-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;width:100%}
+/* min-height follows content estimate; avoid flex-grow voids when node is oversized. */
+.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px);height:auto}
+.bd-main{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;width:100%}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
@@ -390,6 +397,14 @@ const STYLES = `
 .bd-smart-split-msg{width:100%;box-sizing:border-box;font-size:11px;line-height:1.4;color:#f66;padding:0 2px;min-height:0}
 .bd-smart-split-msg.hidden{display:none!important}
 .bd-smart-split-msg.ok{color:#8c8}
+.bd-external-groups-msg{width:100%;box-sizing:border-box;font-size:11px;line-height:1.45;color:#9ad;padding:8px 10px;margin:0 0 4px;background:#152018;border:1px solid #2f4a38;border-radius:6px}
+.bd-external-groups-msg.hidden{display:none!important}
+.bd-wrap.bd-external-groups .bd-batch-card,.bd-wrap.bd-external-groups .bd-fl2v-shot{opacity:.48;pointer-events:none}
+.bd-wrap.bd-external-groups .bd-run-select-bar,.bd-wrap.bd-external-groups .bd-batch-run-check,.bd-wrap.bd-external-groups .bd-run-select-all-wrap{pointer-events:auto;opacity:1}
+.bd-wrap.bd-external-groups .bd-batch-card .bd-batch-run-check{pointer-events:auto;opacity:1}
+/* External mode: duration/delete stay non-interactive; allow media preview playback. */
+.bd-wrap.bd-external-groups .bd-batch-del,.bd-wrap.bd-external-groups .bd-batch-fc input{pointer-events:none!important;opacity:.55}
+.bd-wrap.bd-external-groups .bd-r2v-play,.bd-wrap.bd-external-groups .bd-batch-video video,.bd-wrap.bd-external-groups .bd-batch-audio audio,.bd-wrap.bd-external-groups .bd-r2v-thumb{pointer-events:auto;opacity:1}
 .bd-stage{width:100%;box-sizing:border-box;background:#0c0c0c;border:1px solid #222;border-bottom:none;border-radius:6px 6px 0 0;overflow:hidden;position:relative;min-height:120px;max-height:280px;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
 .bd-stage.hidden{display:none!important}
 .bd-stage-video,.bd-stage-img{width:100%;height:100%;max-height:280px;object-fit:contain;background:#000;display:block}
@@ -528,7 +543,8 @@ const STYLES = `
 .bd-output label{color:#888;font-size:10px;white-space:nowrap}
 .bd-output .bd-out-fixed{display:flex;gap:4px;align-items:center}
 .bd-output .bd-out-fixed.hidden{display:none}
-.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:auto;flex-shrink:0}
+/* Do not use margin-top:auto — with an oversized min-height it creates a huge empty gap above the status bar. */
+.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:6px;flex-shrink:0}
 .bd-run-status.idle .bd-run-title{color:#888}
 .bd-run-status.active .bd-run-title{color:#4fff8f}
 .bd-run-status.done .bd-run-title{color:#7a9cff}
@@ -793,9 +809,11 @@ function getDirectorUiHeight(editor) {
         const batchH = getImageBatchUiHeight(editor);
         // r2v shows the main timeline track (like fl2v) above batch cards.
         if (editor?.isR2vBatch?.()) {
-            return batchH + (editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H) + 160;
+            const track = editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H;
+            // toolbar + track + batch panel (batchH already includes list max-height cap)
+            return batchH + track + 100;
         }
-        return batchH + 140;
+        return batchH + 100;
     }
     if (editor?.getDirectorMode?.() === "fl2v") {
         let h = getFl2vUiHeight(editor) + 160;
@@ -1203,7 +1221,161 @@ class MiniMaxH3DirectorEditor {
         this.updateSelectionUI();
         this.commit(true, { syncTimeline: false });
         this._observeViewportResize();
+        this.syncExternalGroupsTimeline();
         this.scheduleSettleRender();
+    }
+
+    _inputLinkConnected(name) {
+        const inp = this.node?.inputs?.find((i) => i?.name === name);
+        return inp != null && inp.link != null;
+    }
+
+    hasExternalI2vGroups() {
+        return this._inputLinkConnected("i2v_groups");
+    }
+
+    hasExternalR2vGroups() {
+        return this._inputLinkConnected("r2v_groups");
+    }
+
+    updateExternalGroupsBanner() {
+        const el = this.externalGroupsMsgEl || this.root?.querySelector('[data-r="external-groups-msg"]');
+        if (!el) return;
+        const i2v = this.hasExternalI2vGroups();
+        const r2v = this.hasExternalR2vGroups();
+        const active = i2v || r2v;
+        el.classList.toggle("hidden", !active);
+        this.root?.classList.toggle("bd-external-groups", active);
+        // Refresh add/delete visibility when external wiring toggles.
+        if (this.isR2vBatch?.()) setR2vToolbar(this, true);
+        else if (this.isFl2vMode?.()) setFl2vToolbar(this, true);
+        else {
+            updateR2vToolbarBtns(this);
+            updateFl2vToolbarBtns(this);
+        }
+        if (!active) {
+            el.textContent = "";
+            return;
+        }
+        const specs = collectExternalGroupSpecs(this);
+        const n = specs?.length || 0;
+        const base = i2v ? t("external.i2vActive") : t("external.r2vActive");
+        const count = n > 0 ? ` (${t("external.groupCount", { n })})` : "";
+        el.textContent = `${base}${count} ${t("external.durationHint")}`;
+    }
+
+    /** Mirror graph-wired Group count/duration into the Director timeline UI. */
+    syncExternalGroupsTimeline() {
+        this.updateExternalGroupsBanner();
+        const specs = collectExternalGroupSpecs(this);
+        if (!specs?.length) {
+            this._externalGroupsSyncSig = null;
+            return;
+        }
+
+        const mode = this.getDirectorMode?.() || this._directorMode;
+        const taskKey = resolveTaskKey(this.getTaskKey?.() || this.taskTypeWidget?.value);
+        const sig = JSON.stringify(specs.map((s) => [
+            Number(s.durationSec) || 0,
+            s.prompt || "",
+            s.firstImageFile || "",
+            s.lastImageFile || "",
+            (s.refImages || []).map((r) => `${r.index}:${r.imageFile || ""}`).join(","),
+            (s.refVideos || []).map((r) => [
+                r.index,
+                r.videoFile || "",
+                r.previewImageFile || "",
+                r.previewImageUrl || "",
+                r.pairedAudioFile || "",
+                r.linked ? 1 : 0,
+            ].join(":")).join(","),
+            (s.refAudios || []).map((r) => `${r.index}:${r.audioFile || ""}`).join(","),
+        ]));
+        if (this._externalGroupsSyncSig === sig) return;
+        this._externalGroupsSyncSig = sig;
+
+        if (mode === "fl2v") {
+            const prev = this.timeline.shots || [];
+            this.timeline.shots = specs.map((spec, i) => newFl2vShot({
+                ...(prev[i] || {}),
+                id: prev[i]?.id,
+                durationSec: spec.durationSec ?? defaultDurationSec("fl2v"),
+                prompt: (spec.prompt || prev[i]?.prompt || "").trim(),
+                // External graph is source of truth for media previews.
+                startImage: imageRefFromPath(spec.firstImageFile),
+                endImage: imageRefFromPath(spec.lastImageFile),
+            }));
+            syncFl2vFromShots(this);
+            this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.shots.length - 1));
+            updateFl2vDetailUI?.(this);
+            this.scheduleRender?.();
+            this.commit?.(false, { syncTimeline: true });
+            this.updateVideoNameLabel?.();
+            this.updateDomWidgetHeight?.();
+            this.updateRunSelectUI?.();
+            return;
+        }
+
+        if (mode === "prompt_batch" || mode === "image_batch" || isPromptBatchTask(taskKey)) {
+            const prev = this.timeline.segments || [];
+            const isR2v = taskKey === "r2v" || this.hasExternalR2vGroups?.();
+            this.timeline.segments = specs.map((spec, i) => {
+                const firstRef = imageRefFromPath(spec.firstImageFile);
+                const genImage = firstRef
+                    || (isR2v ? (prev[i]?.genImage || { imageFile: "" }) : { imageFile: "" });
+                // External graph is source of truth for r2v media (do not keep stale UI uploads).
+                const refs = isR2v
+                    ? (spec.refImages || []).map((r) => ({
+                        index: r.index,
+                        imageFile: r.imageFile || "",
+                        imageB64: "",
+                    }))
+                    : (prev[i]?.refs || []);
+                const refVideos = isR2v
+                    ? (spec.refVideos || []).map((r) => ({
+                        index: r.index,
+                        videoFile: r.videoFile || "",
+                        fileName: r.fileName || "",
+                        type: r.type || "input",
+                        subfolder: r.subfolder || "",
+                        pairedAudioFile: r.pairedAudioFile || "",
+                        previewImageFile: r.previewImageFile || "",
+                        previewImageUrl: r.previewImageUrl || "",
+                        linked: !!r.linked || !!(r.videoFile || r.previewImageFile || r.previewImageUrl),
+                    }))
+                    : (prev[i]?.refVideos || []);
+                const refAudios = isR2v
+                    ? (spec.refAudios || []).map((r) => ({
+                        index: r.index,
+                        audioFile: r.audioFile || "",
+                        fileName: r.fileName || "",
+                        type: r.type || "input",
+                        subfolder: r.subfolder || "",
+                    }))
+                    : (prev[i]?.refAudios || []);
+                return newBatchSegment({
+                    ...(prev[i] || {}),
+                    id: prev[i]?.id,
+                    durationSec: spec.durationSec ?? defaultDurationSec(taskKey),
+                    prompt: (spec.prompt || prev[i]?.prompt || "").trim(),
+                    negativePrompt: prev[i]?.negativePrompt ?? "",
+                    refs,
+                    refAudios,
+                    refVideos,
+                    genImage: genImage?.imageFile ? genImage : { imageFile: "" },
+                    imageFile: genImage?.imageFile || "",
+                });
+            });
+            normalizeImageBatchSegments(this);
+            this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.segments.length - 1));
+            this.renderImageBatchGroups?.();
+            this.scheduleRender?.();
+            this.commit?.(false, { syncTimeline: true });
+            this.updateVideoNameLabel?.();
+            this.updateDomWidgetHeight?.();
+            this.updateRunSelectUI?.();
+            this.updateSelectionUI?.();
+        }
     }
 
     _observeViewportResize() {
@@ -1296,6 +1468,16 @@ class MiniMaxH3DirectorEditor {
             this.domWidget.computeSize = (width) => [width, h];
             if (this.domWidget.options) {
                 this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
+            }
+        }
+        // Keep LiteGraph node height in sync. Batch list is scroll-capped, so without
+        // this the node stays tall after height estimates shrink → huge empty region.
+        if (this.node?.computeSize && !this.isPlaying) {
+            const sz = this.node.computeSize();
+            const curH = this.node.size?.[1] || 0;
+            if (sz?.[1] != null && Math.abs(curH - sz[1]) > 2) {
+                this.node.setSize([this.node.size[0], sz[1]]);
+                this.node.setDirtyCanvas?.(true, true);
             }
         }
     }
@@ -1540,9 +1722,11 @@ class MiniMaxH3DirectorEditor {
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
                 </div>
             </div>
-            <div class="bd-smart-split-msg hidden" data-r="smart-split-msg" role="status"></div>`;
+            <div class="bd-smart-split-msg hidden" data-r="smart-split-msg" role="status"></div>
+            <div class="bd-external-groups-msg hidden" data-r="external-groups-msg" role="status"></div>`;
         this.root.appendChild(toolbarWrap);
         this.smartSplitMsgEl = toolbarWrap.querySelector('[data-r="smart-split-msg"]');
+        this.externalGroupsMsgEl = toolbarWrap.querySelector('[data-r="external-groups-msg"]');
         this.langToggleBtn = toolbarWrap.querySelector('[data-a="lang-toggle"]');
 
         this.mainBody = document.createElement("div");
@@ -2974,6 +3158,7 @@ class MiniMaxH3DirectorEditor {
         this.viewport?.classList.toggle("hidden", isBatch && !isR2v);
         this.updateStageVisibility();
         this.updateLiveSamplePanel();
+        this.syncExternalGroupsTimeline();
         this.root.querySelector(".bd-split")?.classList.toggle("hidden", isBatch || isFl2v);
         this.batchPanel?.classList.toggle("hidden", !isBatch);
         this.fl2vUi?.root?.classList.toggle("hidden", !isFl2v);
@@ -3976,6 +4161,7 @@ class MiniMaxH3DirectorEditor {
         this.refreshLoopButtonTitle?.();
         this.refreshLiveTaePreviewButton?.();
         this.updateLiveSamplePanel?.();
+        this.syncExternalGroupsTimeline?.();
         updateFl2vDetailUI?.(this);
         updateFl2vToolbarBtns?.(this);
         updateR2vToolbarBtns?.(this);
@@ -4820,6 +5006,73 @@ class MiniMaxH3DirectorEditor {
             if (img) this._thumbCache.set(logicalFrame, img);
             this.scheduleRender();
         });
+    }
+
+    /** Capture a still from an r2v reference video for the timeline strip. */
+    _queueR2vVideoThumb(cacheKey, videoFile, type = "input") {
+        if (!cacheKey || !videoFile) return;
+        if (this._thumbCache.has(cacheKey) || this._thumbPending.has(cacheKey)) return;
+        this._thumbPending.add(cacheKey);
+        const url = inputViewUrl(videoFile, type || "input");
+        const v = document.createElement("video");
+        v.muted = true;
+        v.playsInline = true;
+        v.preload = "auto";
+        v.crossOrigin = "anonymous";
+        let done = false;
+        const finish = (img) => {
+            if (done) return;
+            done = true;
+            this._thumbPending.delete(cacheKey);
+            try {
+                v.removeAttribute("src");
+                v.load();
+            } catch (_) { /* ignore */ }
+            if (img) this._thumbCache.set(cacheKey, img);
+            this.scheduleRender();
+        };
+        const capture = () => {
+            try {
+                if (!v.videoWidth) {
+                    finish(null);
+                    return;
+                }
+                if (!this._thumbCanvas) {
+                    this._thumbCanvas = document.createElement("canvas");
+                    this._thumbCtx = this._thumbCanvas.getContext("2d", { alpha: false });
+                }
+                const ratio = v.videoWidth > THUMB_MAX_W ? THUMB_MAX_W / v.videoWidth : 1;
+                const tw = Math.max(1, Math.round(v.videoWidth * ratio));
+                const th = Math.max(1, Math.round(v.videoHeight * ratio));
+                this._thumbCanvas.width = tw;
+                this._thumbCanvas.height = th;
+                this._thumbCtx.drawImage(v, 0, 0, tw, th);
+                const img = new Image();
+                img.onload = () => finish(img);
+                img.onerror = () => finish(null);
+                img.src = this._thumbCanvas.toDataURL("image/jpeg", THUMB_JPEG_Q);
+            } catch (_) {
+                finish(null);
+            }
+        };
+        v.addEventListener("loadeddata", () => {
+            const seekTo = Math.min(0.15, Math.max(0, (v.duration || 1) * 0.05));
+            const onSeeked = () => {
+                v.removeEventListener("seeked", onSeeked);
+                capture();
+            };
+            v.addEventListener("seeked", onSeeked);
+            try {
+                v.currentTime = seekTo;
+            } catch (_) {
+                capture();
+            }
+            setTimeout(() => {
+                if (!done) capture();
+            }, 700);
+        }, { once: true });
+        v.onerror = () => finish(null);
+        v.src = url;
     }
 
     async _fetchThumb(logicalFrame) {
@@ -6401,7 +6654,28 @@ class MiniMaxH3DirectorEditor {
             );
             const imgFile = refs.find((r) => r?.imageFile)?.imageFile || "";
             const previewB64 = seg.previewB64 || (Array.isArray(seg.previewFrames) ? seg.previewFrames[0] : "");
-            const cacheKey = imgFile ? `r2v:${imgFile}` : (previewB64 ? `r2v-prev:${seg.id || startX}` : "");
+            const vidRef = [...(seg.refVideos || [])]
+                .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
+                .find((r) => r?.videoFile || r?.previewImageFile || r?.previewImageUrl || r?.linked);
+            const vidPath = vidRef?.videoFile || "";
+            const vidType = vidRef?.type || "input";
+            const posterFile = vidRef?.previewImageFile || "";
+            const posterUrl = vidRef?.previewImageUrl || "";
+            let cacheKey = "";
+            let srcKind = "";
+            if (imgFile) {
+                cacheKey = `r2v:${imgFile}`;
+                srcKind = "image";
+            } else if (previewB64) {
+                cacheKey = `r2v-prev:${seg.id || startX}`;
+                srcKind = "preview";
+            } else if (vidPath) {
+                cacheKey = `r2v-vid:${vidType}:${vidPath}`;
+                srcKind = "video";
+            } else if (posterFile || posterUrl) {
+                cacheKey = `r2v-vid-poster:${posterFile || posterUrl}`;
+                srcKind = "poster";
+            }
             const drawCached = (img) => {
                 if (!img?.naturalWidth && !img?.width) return false;
                 const natW = img.naturalWidth || img.width;
@@ -6417,27 +6691,36 @@ class MiniMaxH3DirectorEditor {
                 return true;
             };
             if (cacheKey) {
-                let img = this._thumbCache.get(cacheKey);
-                if (!drawCached(img) && !this._thumbPending.has(cacheKey)) {
-                    this._thumbPending.add(cacheKey);
-                    const el = new Image();
-                    el.crossOrigin = "anonymous";
-                    el.onload = () => {
-                        this._thumbCache.set(cacheKey, el);
-                        this._thumbPending.delete(cacheKey);
-                        this.scheduleRender();
-                    };
-                    el.onerror = () => this._thumbPending.delete(cacheKey);
-                    el.src = imgFile
-                        ? refViewUrl(imgFile)
-                        : (String(previewB64).startsWith("data:") ? previewB64 : `data:image/png;base64,${previewB64}`);
+                const img = this._thumbCache.get(cacheKey);
+                if (!drawCached(img)) {
+                    if (srcKind === "video") {
+                        this._queueR2vVideoThumb(cacheKey, vidPath, vidType);
+                    } else if (!this._thumbPending.has(cacheKey)) {
+                        this._thumbPending.add(cacheKey);
+                        const el = new Image();
+                        el.crossOrigin = "anonymous";
+                        el.onload = () => {
+                            this._thumbCache.set(cacheKey, el);
+                            this._thumbPending.delete(cacheKey);
+                            this.scheduleRender();
+                        };
+                        el.onerror = () => this._thumbPending.delete(cacheKey);
+                        if (srcKind === "image") el.src = refViewUrl(imgFile);
+                        else if (srcKind === "poster") {
+                            el.src = posterUrl || refViewUrl(posterFile);
+                        } else {
+                            el.src = String(previewB64).startsWith("data:")
+                                ? previewB64
+                                : `data:image/png;base64,${previewB64}`;
+                        }
+                    }
                 }
             } else {
                 ctx.fillStyle = "#666";
                 ctx.font = "12px sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText(t("canvas.uploadPicture1"), startX + pxWidth / 2, y0 + h / 2);
+                ctx.fillText(t("canvas.uploadR2vMedia"), startX + pxWidth / 2, y0 + h / 2);
             }
             ctx.restore();
             return;
@@ -7805,7 +8088,12 @@ class MiniMaxH3DirectorEditor {
         if (detail.phase === "plan") {
             title = runTotal > 1 ? t("run.titlePlanning", { n: runTotal, phase: phaseLabel }) : phaseLabel;
         } else if (this.isImageBatch()) {
-            title = t("run.titleBatchGroup", { i: runSeg, n: runTotal, phase: phaseLabel });
+            // Partial run: show timeline card number (e.g. group 4), not compact run order.
+            title = partialRun
+                ? t("run.titleBatchGroupPartial", {
+                    timeline: timelineSeg, i: runSeg, n: runTotal, phase: phaseLabel,
+                })
+                : t("run.titleBatchGroup", { i: runSeg, n: runTotal, phase: phaseLabel });
         } else if (partialRun) {
             title = t("run.titleSegmentPartial", { timeline: timelineSeg, i: runSeg, n: runTotal, phase: phaseLabel });
         } else {
@@ -8075,6 +8363,452 @@ function findDirectorNode(nodeId) {
     return null;
 }
 
+const EXTERNAL_GROUP_NODE_TYPES = new Set([
+    "MiniMaxH3DirectorGroupImageToVideo",
+    "MiniMaxH3DirectorGroupReferenceToVideo",
+]);
+const EXTERNAL_COMBINE_NODE_TYPE = "MiniMaxH3DirectorGroupsCombine";
+
+function graphLinkRecord(graph, linkId) {
+    if (linkId == null || !graph) return null;
+    const links = graph.links;
+    if (!links) return null;
+    let link = links[linkId];
+    if (!link && typeof links.find === "function") {
+        link = links.find((l) => l && (l.id === linkId || l[0] === linkId));
+    }
+    if (!link) return null;
+    return {
+        originId: link.origin_id ?? link[1],
+        originSlot: link.origin_slot ?? link[2],
+    };
+}
+
+function nodeWidgetValue(node, name) {
+    const w = (node?.widgets || []).find((x) => x?.name === name);
+    return w?.value;
+}
+
+/** Normalize LoadImage-style widget value → relative input path. */
+function normalizeImageWidgetPath(value) {
+    if (value == null || value === "") return null;
+    let val = value;
+    if (Array.isArray(val)) val = val[0];
+    if (typeof val === "object" && val) {
+        const name = String(val.filename || val.name || "").trim();
+        if (!name) return null;
+        const sub = String(val.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
+        return sub ? `${sub}/${name}` : name;
+    }
+    if (typeof val === "string") {
+        const s = val.replace(/\s*\[(input|output|temp)\]\s*$/i, "").trim();
+        return s || null;
+    }
+    return null;
+}
+
+function readImageWidgetPath(node) {
+    for (const name of ["image", "image_path", "filename"]) {
+        const path = normalizeImageWidgetPath(nodeWidgetValue(node, name));
+        if (path) return path;
+    }
+    return null;
+}
+
+/** VHS Load Video / Load Video Path use `video`; some loaders use video_path. */
+function readVideoWidgetPath(node) {
+    for (const name of ["video", "video_path", "file"]) {
+        const path = normalizeImageWidgetPath(nodeWidgetValue(node, name));
+        if (path) return path;
+    }
+    return null;
+}
+
+/** LoadAudio uses `audio`; VHS audio output often has no file — fall back to sibling video widget. */
+function readAudioWidgetPath(node) {
+    for (const name of ["audio", "audio_path", "file"]) {
+        const path = normalizeImageWidgetPath(nodeWidgetValue(node, name));
+        if (path) return path;
+    }
+    return readVideoWidgetPath(node);
+}
+
+function mediaBaseName(path) {
+    const s = String(path || "").replace(/\\/g, "/");
+    return s.split("/").pop() || s;
+}
+
+function parseViewUrlToPath(url) {
+    try {
+        const u = new URL(String(url || ""), window.location.origin);
+        const filename = u.searchParams.get("filename");
+        if (!filename) return null;
+        const subfolder = (u.searchParams.get("subfolder") || "").replace(/\\/g, "/").replace(/\/$/, "");
+        return subfolder ? `${subfolder}/${filename}` : filename;
+    } catch {
+        return null;
+    }
+}
+
+function linkedSourceNode(graph, node, inputName) {
+    if (!graph || !node) return null;
+    const inp = (node.inputs || []).find((i) => i?.name === inputName);
+    if (inp?.link == null) return null;
+    const rec = graphLinkRecord(graph, inp.link);
+    if (!rec) return null;
+    return graph.getNodeById?.(rec.originId) || null;
+}
+
+/** Resolve an IMAGE input on `node` to a Comfy input-folder relative path. */
+function resolveLinkedImageFile(graph, node, inputName, depth = 0) {
+    if (!graph || !node || depth > 8) return null;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src) return null;
+
+    const direct = readImageWidgetPath(src);
+    if (direct) return direct;
+
+    const imgEl = (src.imageIndex != null ? src.imgs?.[src.imageIndex] : null) || src.imgs?.[0];
+    const fromPreview = parseViewUrlToPath(imgEl?.src);
+    if (fromPreview) return fromPreview;
+
+    // Walk through IMAGE passthrough nodes (Resize, etc.).
+    const imgInputs = (src.inputs || []).filter((i) => String(i?.type || "") === "IMAGE" && i.link != null);
+    for (const next of imgInputs) {
+        const path = resolveLinkedImageFile(graph, src, next.name, depth + 1);
+        if (path) return path;
+    }
+    return null;
+}
+
+/**
+ * Resolve ref_video IMAGE-batch wiring to a previewable file path.
+ * VHS Load Video exposes frames on IMAGE but the path lives on the `video` widget.
+ */
+function resolveLinkedVideoFile(graph, node, inputName, depth = 0) {
+    if (!graph || !node || depth > 8) return null;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src) return null;
+
+    const direct = readVideoWidgetPath(src);
+    if (direct) return direct;
+
+    // Some loaders still put the clip name on filename / image widgets.
+    const fallback = readImageWidgetPath(src);
+    if (fallback && /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(fallback)) return fallback;
+
+    const walkTypes = new Set(["IMAGE", "VIDEO"]);
+    const nextInputs = (src.inputs || []).filter(
+        (i) => walkTypes.has(String(i?.type || "").toUpperCase()) && i.link != null,
+    );
+    for (const next of nextInputs) {
+        const path = resolveLinkedVideoFile(graph, src, next.name, depth + 1);
+        if (path) return path;
+    }
+    return null;
+}
+
+/** Resolve AUDIO wiring (LoadAudio / VHS audio out) to a previewable path. */
+function resolveLinkedAudioFile(graph, node, inputName, depth = 0) {
+    if (!graph || !node || depth > 8) return null;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src) return null;
+
+    const direct = readAudioWidgetPath(src);
+    if (direct) return direct;
+
+    const nextInputs = (src.inputs || []).filter(
+        (i) => String(i?.type || "").toUpperCase() === "AUDIO" && i.link != null,
+    );
+    for (const next of nextInputs) {
+        const path = resolveLinkedAudioFile(graph, src, next.name, depth + 1);
+        if (path) return path;
+    }
+    return null;
+}
+
+function imageRefFromPath(path) {
+    if (!path) return null;
+    return { imageFile: path, width: 0, height: 0 };
+}
+
+function videoRefFromPath(path, index) {
+    if (!path) return null;
+    return {
+        index,
+        videoFile: path,
+        fileName: mediaBaseName(path),
+        type: "input",
+        subfolder: "",
+        pairedAudioFile: "",
+        previewImageFile: "",
+        previewImageUrl: "",
+        linked: true,
+    };
+}
+
+/** First-frame poster from Load Video / IMAGE-batch upstream (when file path missing). */
+function resolveLinkedVideoPoster(graph, node, inputName, depth = 0) {
+    if (!graph || !node || depth > 8) return null;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src) return null;
+    const imgEl = (src.imageIndex != null ? src.imgs?.[src.imageIndex] : null) || src.imgs?.[0];
+    if (imgEl?.src) {
+        return {
+            previewImageUrl: imgEl.src,
+            previewImageFile: parseViewUrlToPath(imgEl.src) || "",
+        };
+    }
+    const nextInputs = (src.inputs || []).filter(
+        (i) => String(i?.type || "").toUpperCase() === "IMAGE" && i.link != null,
+    );
+    for (const next of nextInputs) {
+        const poster = resolveLinkedVideoPoster(graph, src, next.name, depth + 1);
+        if (poster) return poster;
+    }
+    return null;
+}
+
+function collectAutogrowVideoRefs(graph, node) {
+    const found = new Map();
+    const re = /(?:^|\.)ref_video_(\d+)$/;
+    for (const inp of node.inputs || []) {
+        const m = String(inp?.name || "").match(re);
+        if (!m || inp.link == null) continue;
+        const idx = parseInt(m[1], 10);
+        if (!Number.isFinite(idx) || found.has(idx)) continue;
+        patchUpstreamVideoWidgetSync(graph, node, inp.name);
+        const path = resolveLinkedVideoFile(graph, node, inp.name);
+        const poster = resolveLinkedVideoPoster(graph, node, inp.name);
+        if (path) {
+            const ref = videoRefFromPath(path, idx);
+            if (poster) {
+                ref.previewImageFile = poster.previewImageFile || "";
+                ref.previewImageUrl = poster.previewImageUrl || "";
+            }
+            found.set(idx, ref);
+        } else if (poster?.previewImageUrl || poster?.previewImageFile) {
+            found.set(idx, {
+                index: idx,
+                videoFile: "",
+                fileName: poster.previewImageFile
+                    ? mediaBaseName(poster.previewImageFile)
+                    : `video_${idx + 1}`,
+                type: "input",
+                subfolder: "",
+                pairedAudioFile: "",
+                previewImageFile: poster.previewImageFile || "",
+                previewImageUrl: poster.previewImageUrl || "",
+                linked: true,
+            });
+        } else {
+            // Linked IMAGE batch without resolvable path/poster — still mark occupied.
+            found.set(idx, {
+                index: idx,
+                videoFile: "",
+                fileName: "",
+                type: "input",
+                subfolder: "",
+                pairedAudioFile: "",
+                previewImageFile: "",
+                previewImageUrl: "",
+                linked: true,
+            });
+        }
+    }
+    return [...found.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
+function audioRefFromPath(path, index) {
+    if (!path) return null;
+    return {
+        index,
+        audioFile: path,
+        fileName: mediaBaseName(path),
+        type: "input",
+        subfolder: "",
+    };
+}
+
+function patchUpstreamWidgetSync(graph, node, inputName, widgetNames) {
+    if (!graph || !node || !widgetNames?.length) return;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src?.widgets) return;
+    const names = new Set(widgetNames);
+    for (const w of src.widgets) {
+        if (!w || !names.has(w.name)) continue;
+        if (w._mmxExternalMediaSyncPatched) continue;
+        w._mmxExternalMediaSyncPatched = true;
+        const prev = w.callback;
+        w.callback = function (...cbArgs) {
+            const r = prev?.apply(this, cbArgs);
+            queueMicrotask(() => notifyDirectorsSyncExternalGroups());
+            return r;
+        };
+    }
+}
+
+function patchUpstreamImageWidgetSync(graph, node, inputName) {
+    patchUpstreamWidgetSync(graph, node, inputName, ["image", "image_path", "filename"]);
+}
+
+function patchUpstreamVideoWidgetSync(graph, node, inputName) {
+    patchUpstreamWidgetSync(graph, node, inputName, ["video", "video_path", "file", "filename"]);
+}
+
+function patchUpstreamAudioWidgetSync(graph, node, inputName) {
+    patchUpstreamWidgetSync(graph, node, inputName, ["audio", "audio_path", "video", "video_path", "file", "filename"]);
+}
+
+/** Collect Autogrow / legacy slots matching `(?:^|\.)prefix_(\\d+)$`. */
+function collectAutogrowSlotRefs(graph, node, prefix, resolvePath, toRef, patchSync) {
+    const found = new Map();
+    const re = new RegExp(`(?:^|\\.)${prefix}_(\\d+)$`);
+    for (const inp of node.inputs || []) {
+        const m = String(inp?.name || "").match(re);
+        if (!m || inp.link == null) continue;
+        const idx = parseInt(m[1], 10);
+        if (!Number.isFinite(idx) || found.has(idx)) continue;
+        patchSync?.(graph, node, inp.name);
+        const path = resolvePath(graph, node, inp.name);
+        const ref = path ? toRef(path, idx) : null;
+        if (ref) found.set(idx, ref);
+    }
+    return [...found.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
+function readExternalGroupSpec(node, graph = null) {
+    const g = graph || app.graph || app.canvas?.graph;
+    const durRaw = Number(nodeWidgetValue(node, "duration_sec"));
+    const prompt = String(nodeWidgetValue(node, "prompt") ?? "");
+    const cls = node?.comfyClass || node?.type || "";
+    const firstImageFile = resolveLinkedImageFile(g, node, "first_frame");
+    const lastImageFile = resolveLinkedImageFile(g, node, "last_frame");
+    patchUpstreamImageWidgetSync(g, node, "first_frame");
+    patchUpstreamImageWidgetSync(g, node, "last_frame");
+
+    let refImages = [];
+    let refVideos = [];
+    let refAudios = [];
+    if (cls === "MiniMaxH3DirectorGroupReferenceToVideo") {
+        // Autogrow: ref_images.ref_image_0 / ref_videos.ref_video_0 / …
+        refImages = collectAutogrowSlotRefs(
+            g, node, "ref_image", resolveLinkedImageFile,
+            (path, idx) => ({ index: idx, imageFile: path, imageB64: "" }),
+            patchUpstreamImageWidgetSync,
+        );
+        refVideos = collectAutogrowVideoRefs(g, node);
+        const standaloneAudios = collectAutogrowSlotRefs(
+            g, node, "ref_audio", resolveLinkedAudioFile,
+            audioRefFromPath,
+            patchUpstreamAudioWidgetSync,
+        );
+        // Paired soundtrack for the same-index reference video (ref_video_audio_N).
+        const pairedAudios = collectAutogrowSlotRefs(
+            g, node, "ref_video_audio", resolveLinkedAudioFile,
+            audioRefFromPath,
+            patchUpstreamAudioWidgetSync,
+        );
+        const pairedByIndex = new Map(pairedAudios.map((a) => [a.index, a]));
+        for (const vid of refVideos) {
+            const paired = pairedByIndex.get(vid.index);
+            if (paired?.audioFile) {
+                vid.pairedAudioFile = paired.audioFile;
+                pairedByIndex.delete(vid.index);
+            }
+        }
+        // Show unpaired video-audio (or standalone) in the 参考音频 strip.
+        const audioMap = new Map(standaloneAudios.map((a) => [a.index, a]));
+        for (const [idx, paired] of pairedByIndex) {
+            if (!audioMap.has(idx)) audioMap.set(idx, paired);
+        }
+        refAudios = [...audioMap.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+    }
+
+    return {
+        durationSec: Number.isFinite(durRaw) && durRaw > 0 ? durRaw : null,
+        prompt,
+        firstImageFile,
+        lastImageFile,
+        refImages,
+        refVideos,
+        refAudios,
+    };
+}
+
+/** Autogrow slots are named `groups.group_0`; legacy used `group_0` / `group_01`. */
+function combineGroupSlotIndex(name) {
+    const m = String(name || "").match(/(?:^|\.)group_(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+}
+
+function isCombineGroupSlot(input) {
+    if (!input) return false;
+    if (combineGroupSlotIndex(input.name) != null) return true;
+    // Fallback: any MMX_DIR_GROUP input on the combine node.
+    return String(input.type || "") === "MMX_DIR_GROUP";
+}
+
+function expandExternalGroupLink(graph, linkId, depth = 0) {
+    if (linkId == null || depth > 10) return [];
+    const rec = graphLinkRecord(graph, linkId);
+    if (!rec) return [];
+    const node = graph.getNodeById?.(rec.originId);
+    if (!node) return [];
+    const cls = node.comfyClass || node.type || "";
+    if (cls === EXTERNAL_COMBINE_NODE_TYPE) {
+        const out = [];
+        const slots = (node.inputs || [])
+            .filter(isCombineGroupSlot)
+            .sort((a, b) => {
+                const ai = combineGroupSlotIndex(a.name);
+                const bi = combineGroupSlotIndex(b.name);
+                if (ai != null && bi != null) return ai - bi;
+                return 0;
+            });
+        for (const input of slots) {
+            if (input.link == null) continue;
+            out.push(...expandExternalGroupLink(graph, input.link, depth + 1));
+        }
+        return out;
+    }
+    if (EXTERNAL_GROUP_NODE_TYPES.has(cls)) {
+        return [readExternalGroupSpec(node, graph)];
+    }
+    // Unknown upstream packer — still reserve one slot for run-select/timeline.
+    return [{
+        durationSec: null,
+        prompt: "",
+        firstImageFile: null,
+        lastImageFile: null,
+        refImages: [],
+        refVideos: [],
+        refAudios: [],
+    }];
+}
+
+function collectExternalGroupSpecs(editor) {
+    const port = editor?.hasExternalI2vGroups?.()
+        ? "i2v_groups"
+        : editor?.hasExternalR2vGroups?.()
+            ? "r2v_groups"
+            : null;
+    if (!port) return null;
+    const graph = app.graph ?? app.canvas?.graph;
+    const inp = editor?.node?.inputs?.find((i) => i?.name === port);
+    if (!graph || inp?.link == null) return null;
+    const specs = expandExternalGroupLink(graph, inp.link);
+    return specs.length ? specs : null;
+}
+
+function notifyDirectorsSyncExternalGroups() {
+    const graph = app.graph ?? app.canvas?.graph;
+    for (const node of graph?._nodes ?? graph?.nodes ?? []) {
+        if (!isMiniMaxH3DirectorNode(node)) continue;
+        node._minimaxEditor?.syncExternalGroupsTimeline?.();
+    }
+}
+
 function clearAllDirectorRunStatus() {
     const graph = app.graph ?? app.canvas?.graph;
     for (const node of graph?._nodes ?? graph?.nodes ?? []) {
@@ -8253,6 +8987,37 @@ app.registerExtension({
         };
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
+        const cls = nodeType?.comfyClass || nodeData?.name || "";
+        if (EXTERNAL_GROUP_NODE_TYPES.has(cls) || cls === EXTERNAL_COMBINE_NODE_TYPE) {
+            const onConnectionsChange = nodeType.prototype.onConnectionsChange;
+            nodeType.prototype.onConnectionsChange = function (...args) {
+                const out = onConnectionsChange?.apply(this, args);
+                // Combine/Group wiring changes do not fire Director.onConnectionsChange.
+                queueMicrotask(() => notifyDirectorsSyncExternalGroups());
+                return out;
+            };
+            const onCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                const out = onCreated?.apply(this, arguments);
+                // Keep Director timeline in sync when duration/prompt widgets change.
+                queueMicrotask(() => {
+                    for (const w of this.widgets || []) {
+                        if (w?.name !== "duration_sec" && w?.name !== "prompt") continue;
+                        if (w._mmxExternalSyncPatched) continue;
+                        w._mmxExternalSyncPatched = true;
+                        const prev = w.callback;
+                        w.callback = function (...cbArgs) {
+                            const r = prev?.apply(this, cbArgs);
+                            notifyDirectorsSyncExternalGroups();
+                            return r;
+                        };
+                    }
+                });
+                return out;
+            };
+            return;
+        }
+
         if (!isDirectorNodeDef(nodeType, nodeData)) return;
 
         const onCreated = nodeType.prototype.onNodeCreated;
@@ -8324,6 +9089,14 @@ app.registerExtension({
             // Reselect often lands after graph zoom/layout changes — settle redraw
             // fixes thumbs that were stretched from a mismatched canvas CSS box.
             this._minimaxEditor?.scheduleSettleRender?.();
+            this._minimaxEditor?.syncExternalGroupsTimeline?.();
+            return out;
+        };
+
+        const onConnectionsChange = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function (...args) {
+            const out = onConnectionsChange?.apply(this, args);
+            this._minimaxEditor?.syncExternalGroupsTimeline?.();
             return out;
         };
 
@@ -8366,6 +9139,8 @@ app.registerExtension({
                 ed.selectedIndex = 0;
                 ed.updateSelectionUI();
                 ed.commit(true, { syncTimeline: false });
+                ed._externalGroupsSyncSig = null;
+                ed.syncExternalGroupsTimeline?.();
                 ed.scheduleSettleRender?.();
             }, 80);
             return out;

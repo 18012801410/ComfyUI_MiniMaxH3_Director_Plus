@@ -70,6 +70,26 @@ class MiniMaxH3Director:
                 **director_timeline_required_inputs(),
             },
             "optional": {
+                "i2v_groups": (
+                    "MMX_DIR_GROUP",
+                    {
+                        "tooltip": (
+                            "External Image to Video group(s) (t2v / i2v / fl2v). "
+                            "When connected, overrides UI cards for execution (external priority). "
+                            "Connect Group (Image to Video).group, or Groups Combine."
+                        ),
+                    },
+                ),
+                "r2v_groups": (
+                    "MMX_DIR_GROUP",
+                    {
+                        "tooltip": (
+                            "External Reference to Video group(s). "
+                            "When connected, overrides UI cards for execution (external priority). "
+                            "Connect Group (Reference to Video).group, or Groups Combine."
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
@@ -130,7 +150,9 @@ class MiniMaxH3Director:
     DESCRIPTION = (
         "MiniMax H3 Director: MiniMaxH3ImageToVideo / ReferenceToVideo conditioning, "
         "single-stage KSampler + MiniMaxH3SigmaShift, LTXVSeparateAVLatent decode. "
-        "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
+        "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
+        "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
+        "(external priority over UI cards). Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
     )
 
     def execute(
@@ -148,6 +170,8 @@ class MiniMaxH3Director:
         total_frames,
         timeline_data,
         unique_id=None,
+        i2v_groups=None,
+        r2v_groups=None,
         steps=25,
         sampler="res_multistep",
         scheduler="simple",
@@ -171,6 +195,8 @@ class MiniMaxH3Director:
             height=height,
             ref_max_size=ref_max_size,
             unique_id=unique_id,
+            i2v_groups=i2v_groups,
+            r2v_groups=r2v_groups,
         )
 
         combined, segment_outputs, segment_audios, report = execute_director_plan_core(
