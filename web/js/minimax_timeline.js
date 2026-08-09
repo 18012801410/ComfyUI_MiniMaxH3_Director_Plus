@@ -8749,13 +8749,46 @@ function isCombineGroupSlot(input) {
     return String(input.type || "") === "MMX_DIR_GROUP";
 }
 
+/**
+ * Frontend-only / wiring passthrough nodes that must be skipped when resolving
+ * external groups for the Director UI.
+ *
+ * Official ComfyUI "reroute dots" are often just link path points (origin_id still
+ * points at Combine) — so they already work. rgthree inserts a real virtual node
+ * `Reroute (rgthree)` into the link chain, which used to stop expansion here.
+ */
+function isExternalGroupPassthroughNode(node) {
+    if (!node) return false;
+    const cls = String(node.comfyClass || node.type || "");
+    if (/reroute/i.test(cls)) return true;
+    // Generic virtual single-input passthrough (frontend-only nodes).
+    if (node.isVirtualNode) {
+        const linked = (node.inputs || []).filter((i) => i?.link != null);
+        if (linked.length === 1) return true;
+    }
+    return false;
+}
+
+function passthroughUpstreamLinkId(node) {
+    const linked = (node?.inputs || []).filter((i) => i?.link != null);
+    return linked.length ? linked[0].link : null;
+}
+
 function expandExternalGroupLink(graph, linkId, depth = 0) {
-    if (linkId == null || depth > 10) return [];
+    if (linkId == null || depth > 16) return [];
     const rec = graphLinkRecord(graph, linkId);
     if (!rec) return [];
     const node = graph.getNodeById?.(rec.originId);
     if (!node) return [];
     const cls = node.comfyClass || node.type || "";
+
+    // Walk through Reroute / rgthree Reroute / other virtual passthroughs.
+    if (isExternalGroupPassthroughNode(node)) {
+        const upstream = passthroughUpstreamLinkId(node);
+        if (upstream == null) return [];
+        return expandExternalGroupLink(graph, upstream, depth + 1);
+    }
+
     if (cls === EXTERNAL_COMBINE_NODE_TYPE) {
         const out = [];
         const slots = (node.inputs || [])
