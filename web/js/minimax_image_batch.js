@@ -2074,6 +2074,40 @@ function _clearBatchListFillStyles(list, host, wrap, panel) {
     if (host) host.style.height = "";
 }
 
+/** Remember user-dragged node height so Run/progress sync won't forget it. */
+function captureDomWidgetStretchFromNode(editor, { floor = 0 } = {}) {
+    const minH = typeof editor?.getDirectorUiMinHeight === "function"
+        ? editor.getDirectorUiMinHeight()
+        : 0;
+    const node = editor?.node;
+    const widget = editor?.domWidget;
+    const base = Math.max(minH || 0, floor || 0);
+    if (!node?.size || !widget) {
+        if (base > 0) editor._domWidgetStretchH = base;
+        return base;
+    }
+    let other = 48;
+    for (const w of node.widgets || []) {
+        if (w === widget) continue;
+        try {
+            const s = w.computeSize?.(node.size[0]);
+            const wh = Array.isArray(s) ? Number(s[1]) : Number(s);
+            other += Number.isFinite(wh) && wh > 0 ? wh : 20;
+        } catch {
+            other += 20;
+        }
+    }
+    const stretch = Math.max(base, (node.size[1] || 0) - other);
+    editor._domWidgetStretchH = stretch;
+    widget.computeSize = (width) => {
+        const nextMin = typeof editor.getDirectorUiMinHeight === "function"
+            ? editor.getDirectorUiMinHeight()
+            : stretch;
+        return [width, Math.max(nextMin, editor._domWidgetStretchH || stretch)];
+    };
+    return stretch;
+}
+
 /**
  * When the Director node is taller than the content minimum, grow the batch list
  * viewport to fill leftover space (still scroll when groups overflow).
@@ -2090,37 +2124,18 @@ export function syncBatchPanelFillHeight(editor) {
     wrap.classList.toggle("bd-batch-fill", batchOn);
     if (!batchOn) {
         _clearBatchListFillStyles(list, host, wrap, panel);
-        editor._domWidgetStretchH = 0;
+        // Keep stretch for non-batch modes too (common panel / timeline), so Queue
+        // progress resize sync does not snap the node back to content min (#7).
+        captureDomWidgetStretchFromNode(editor);
         return;
     }
 
     const minH = typeof editor.getDirectorUiMinHeight === "function"
         ? editor.getDirectorUiMinHeight()
         : 0;
-    const node = editor.node;
-    const widget = editor.domWidget;
-    let stretch = minH || BATCH_LIST_MAX_H;
-    if (node?.size && widget) {
-        let other = 48;
-        for (const w of node.widgets || []) {
-            if (w === widget) continue;
-            try {
-                const s = w.computeSize?.(node.size[0]);
-                const wh = Array.isArray(s) ? Number(s[1]) : Number(s);
-                other += Number.isFinite(wh) && wh > 0 ? wh : 20;
-            } catch {
-                other += 20;
-            }
-        }
-        stretch = Math.max(minH || BATCH_LIST_MAX_H, (node.size[1] || 0) - other);
-        editor._domWidgetStretchH = stretch;
-        widget.computeSize = (width) => {
-            const nextMin = typeof editor.getDirectorUiMinHeight === "function"
-                ? editor.getDirectorUiMinHeight()
-                : stretch;
-            return [width, Math.max(nextMin, editor._domWidgetStretchH || stretch)];
-        };
-    }
+    const stretch = captureDomWidgetStretchFromNode(editor, {
+        floor: minH || BATCH_LIST_MAX_H,
+    });
 
     // Force host/wrap to the node-allocated height so flex children can fill it.
     host.style.height = `${stretch}px`;

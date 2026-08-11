@@ -926,8 +926,14 @@ function syncDirectorNodeSize(node, editor) {
     if (!node?.computeSize) return;
     if (editor) editor.updateDomWidgetHeight?.();
     const sz = node.computeSize();
-    node.setSize([node.size[0], sz[1]]);
-    node.setDirtyCanvas?.(true, true);
+    const curH = node.size?.[1] || 0;
+    const nextH = sz?.[1];
+    // Grow for content (e.g. run progress bar); never shrink a user-resized node
+    // — otherwise Queue/progress sync snaps height back to content minimum (#7).
+    if (nextH != null && curH < nextH - 2) {
+        node.setSize([node.size[0], nextH]);
+        node.setDirtyCanvas?.(true, true);
+    }
 }
 
 function ensureDirectorDomWidgetWidth(node) {
