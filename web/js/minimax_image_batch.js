@@ -1,4 +1,4 @@
-﻿/** Multi prompt-group UI for t2i / i2i / r2i / t2v / i2v / r2v (prompt batch mode). */
+/** Multi prompt-group UI for t2i / i2i / r2i / t2v / i2v / r2v (prompt batch mode). */
 
 import { api } from "../../scripts/api.js";
 import {
@@ -28,7 +28,7 @@ import {
     roundDurationSec,
     sumFrameCounts,
 } from "./minimax_gen_timeline.js";
-import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
+import { refreshPromptTokenEditors, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -47,6 +47,10 @@ function _refHasImage(r) {
 
 function _refHasAudio(r) {
     return !!(r?.audioFile || r?.fileName);
+}
+
+function _refHasVideo(r) {
+    return !!(r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked);
 }
 
 /** Highest filled absolute index + 1 (0 when empty). */
@@ -77,10 +81,25 @@ export function r2vCommonAudioOffset(editor) {
     );
 }
 
+export function r2vCommonVideoOffset(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return 0;
+    return Math.min(
+        MAX_REFERENCE_VIDEOS,
+        nextRefIndexAfter(editor.timeline?.global?.refVideos, _refHasVideo),
+    );
+}
+
 export function listCommonImageRefs(editor) {
     if (!editor?.isR2vCommonEnabled?.()) return [];
     return [...(editor.timeline?.global?.refs || [])]
         .filter(_refHasImage)
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
+}
+
+export function listCommonVideoRefs(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return [];
+    return [...(editor.timeline?.global?.refVideos || [])]
+        .filter(_refHasVideo)
         .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
 }
 
@@ -146,7 +165,8 @@ export function rebaseR2vGroupSlotsForCommon(editor) {
     if (!editor?.isR2vCommonEnabled?.()) return false;
     const picOff = r2vCommonPicOffset(editor);
     const audOff = r2vCommonAudioOffset(editor);
-    if (picOff <= 0 && audOff <= 0) return false;
+    const vidOff = r2vCommonVideoOffset(editor);
+    if (picOff <= 0 && audOff <= 0 && vidOff <= 0) return false;
     let changed = false;
     for (const seg of editor.timeline?.segments || []) {
         if (Array.isArray(seg.refs) && seg.refs.length) {
@@ -162,6 +182,15 @@ export function rebaseR2vGroupSlotsForCommon(editor) {
             );
             if (r.changed) {
                 seg.refAudios = r.list;
+                changed = true;
+            }
+        }
+        if (Array.isArray(seg.refVideos) && seg.refVideos.length) {
+            const r = _rebaseIndexedMedia(
+                seg.refVideos, _refHasVideo, vidOff, MAX_REFERENCE_VIDEOS,
+            );
+            if (r.changed) {
+                seg.refVideos = r.list;
                 changed = true;
             }
         }
@@ -307,6 +336,7 @@ export function flushBatchPromptInputs(editor) {
     const segs = editor?.timeline?.segments;
     if (!Array.isArray(segs) || !segs.length) return;
     list.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
+        el.__bdTokenApi?.sync?.();
         const index = parseInt(el.getAttribute("data-batch-prompt-index"), 10);
         if (!Number.isFinite(index) || index < 0 || index >= segs.length) return;
         const live = segs[index];
@@ -488,9 +518,12 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-prompts .bd-label{color:#888;font-size:10px}
 .bd-batch-r2v .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;flex:1 1 auto;min-height:380px;display:flex;flex-direction:column}
 .bd-batch-r2v .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-.bd-batch-prompts textarea{width:100%;min-height:88px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;box-sizing:border-box;font-family:inherit;line-height:1.35}
-.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
-.bd-batch-r2v .bd-batch-prompts textarea{min-height:360px;height:100%;flex:1;resize:vertical;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
+.bd-batch-prompts textarea,.bd-batch-prompts .bd-token-wrap{width:100%;min-height:88px;box-sizing:border-box}
+.bd-batch-prompts textarea{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;font-family:inherit;line-height:1.35}
+.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,
+.bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap{min-height:120px;height:100%;resize:vertical}
+.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:360px;height:100%;flex:1;resize:vertical}
+.bd-batch-r2v .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:220px;min-height:160px;justify-self:end}
 .bd-batch-r2v .bd-batch-preview{min-height:220px;flex:0 0 auto;height:auto;border-radius:10px;border-color:#262626;background:#0c0c0c;padding:8px;font-size:11px;color:#666}
@@ -1036,7 +1069,7 @@ function fileBaseName(path) {
     return s.split("/").pop() || s;
 }
 
-function countFilledRefs(seg, { picOffset = 0, audOffset = 0 } = {}) {
+function countFilledRefs(seg, { picOffset = 0, audOffset = 0, vidOffset = 0 } = {}) {
     let imgs = 0;
     let videos = 0;
     let audios = 0;
@@ -1052,7 +1085,13 @@ function countFilledRefs(seg, { picOffset = 0, audOffset = 0 } = {}) {
         }
     }
     for (const r of seg.refVideos || []) {
-        if (r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked) {
+        const idx = Number(r.index ?? r.slot);
+        if (
+            _refHasVideo(r)
+            && Number.isFinite(idx)
+            && idx >= vidOffset
+            && idx < MAX_REFERENCE_VIDEOS
+        ) {
             videos += 1;
         }
     }
@@ -1086,6 +1125,8 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refAudioLabel(slot);
     const file = ref?.audioFile || ref?.fileName || "";
     el.className = `bd-batch-audio${file ? " has-audio" : ""}`;
+    el.dataset.refKind = "audio";
+    el.dataset.refIndex = String(slot);
     el.title = file
         ? t("ref.audioTitleFilled", { label, file })
         : t("ref.clickUpload", { label });
@@ -1168,6 +1209,8 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const hasMedia = !!(file || posterSrc || ref?.linked);
     const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
     el.className = `bd-batch-video${hasMedia ? " has-video" : ""}`;
+    el.dataset.refKind = "video";
+    el.dataset.refIndex = String(slot);
     el.title = hasMedia
         ? t("ref.videoTitleFilled", { label, file: titleFile || label })
         : t("ref.videoTitleEmpty", { label });
@@ -1285,10 +1328,13 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
 function appendR2vMediaSections(card, seg, index, editor) {
     const picOffset = r2vCommonPicOffset(editor);
     const audOffset = r2vCommonAudioOffset(editor);
+    const vidOffset = r2vCommonVideoOffset(editor);
     const picSlots = Math.max(0, R2V_PICTURE_SLOTS - picOffset);
     const audSlots = Math.max(0, MAX_REFERENCE_AUDIOS - audOffset);
-    const counts = countFilledRefs(seg, { picOffset, audOffset });
+    const vidSlots = Math.max(0, MAX_REFERENCE_VIDEOS - vidOffset);
+    const counts = countFilledRefs(seg, { picOffset, audOffset, vidOffset });
     const commonImgs = listCommonImageRefs(editor);
+    const commonVids = listCommonVideoRefs(editor);
     const body = document.createElement("div");
     body.className = "bd-batch-r2v-body";
 
@@ -1378,6 +1424,8 @@ function appendR2vMediaSections(card, seg, index, editor) {
             const ref = (seg.refs || []).find((r) => Number(r.index ?? r.slot) === abs);
             const slot = document.createElement("div");
             slot.className = "bd-batch-ref";
+            slot.dataset.refKind = "image";
+            slot.dataset.refIndex = String(abs);
             if (local >= visible) slot.classList.add("bd-r2v-pic-hidden");
             renderR2vRefSlot(slot, ref, abs, index, editor);
             slot.onclick = () => {
@@ -1422,27 +1470,65 @@ function appendR2vMediaSections(card, seg, index, editor) {
     }
     assets.appendChild(imgSection);
 
+    if (commonVids.length) {
+        const inheritVids = createR2vSection(
+            t("batch.r2v.commonInheritVideos"),
+            `${commonVids.length}`,
+        );
+        inheritVids.classList.add("bd-r2v-common-inherit");
+        const inheritGrid = document.createElement("div");
+        inheritGrid.className = "bd-batch-videos";
+        for (const ref of commonVids) {
+            const abs = Number(ref.index ?? ref.slot ?? 0);
+            const slot = document.createElement("div");
+            renderVideoSlot(slot, ref, abs, index, editor, { r2v: true });
+            // Read-only inherit: strip remove control and upload click.
+            slot.querySelector(".x")?.remove();
+            slot.title = t("batch.r2v.commonInheritTip", { label: refVideoLabel(abs) });
+            slot.onclick = (e) => {
+                if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, video")) return;
+                if (e.target.closest?.(".bd-r2v-thumb")) {
+                    slot.querySelector(".bd-r2v-play")?.click();
+                }
+            };
+            inheritGrid.appendChild(slot);
+        }
+        inheritVids.appendChild(inheritGrid);
+        assets.appendChild(inheritVids);
+    }
+
+    const groupVidTitle = vidOffset > 0
+        ? t("batch.r2v.sectionVideosFrom", { n: vidOffset + 1 })
+        : t("batch.r2v.sectionVideos");
     const videoSection = createR2vSection(
-        t("batch.r2v.sectionVideos"),
-        `${counts.videos}/${MAX_REFERENCE_VIDEOS}`,
+        groupVidTitle,
+        vidSlots > 0 ? `${counts.videos}/${vidSlots}` : "0/0",
     );
     const videos = document.createElement("div");
     videos.className = "bd-batch-videos";
-    for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
-        const ref = (seg.refVideos || []).find((r) => Number(r.index ?? r.slot) === i);
-        const slot = document.createElement("div");
-        renderVideoSlot(slot, ref, i, index, editor, { r2v: true });
-        slot.onclick = (e) => {
-            if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
-            if (ref && e.target.closest?.(".bd-r2v-thumb")) {
-                slot.querySelector(".bd-r2v-play")?.click();
-                return;
-            }
-            uploadSegVideo(editor, index, i);
-        };
-        videos.appendChild(slot);
+    if (vidSlots <= 0 && vidOffset > 0) {
+        const empty = document.createElement("p");
+        empty.className = "bd-r2v-slot-hint";
+        empty.textContent = t("batch.r2v.noGroupVideoSlots");
+        videoSection.appendChild(empty);
+    } else {
+        for (let local = 0; local < vidSlots; local++) {
+            const abs = vidOffset + local;
+            const ref = (seg.refVideos || []).find((r) => Number(r.index ?? r.slot) === abs);
+            const slot = document.createElement("div");
+            renderVideoSlot(slot, ref, abs, index, editor, { r2v: true });
+            slot.onclick = (e) => {
+                if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+                if (ref && e.target.closest?.(".bd-r2v-thumb")) {
+                    slot.querySelector(".bd-r2v-play")?.click();
+                    return;
+                }
+                uploadSegVideo(editor, index, abs);
+            };
+            videos.appendChild(slot);
+        }
+        videoSection.appendChild(videos);
     }
-    videoSection.appendChild(videos);
     assets.appendChild(videoSection);
 
     const groupAudTitle = audOffset > 0
@@ -1750,6 +1836,7 @@ export function renderImageBatchGroups(editor) {
         const hasCommonMedia = commonOn && (
             (global.refs || []).some((r) => r?.imageFile)
             || (global.refAudios || []).some((r) => r?.audioFile || r?.fileName)
+            || (global.refVideos || []).some((r) => _refHasVideo(r))
         );
         const hasAnyMedia = hasCommonMedia || (editor.timeline.segments || []).some((s) => (
             (s.refs || []).some((r) => r?.imageFile)
@@ -1911,6 +1998,8 @@ export function renderImageBatchGroups(editor) {
                 const ref = (seg.refs || []).find((r) => Number(r.index ?? r.slot) === i);
                 const slot = document.createElement("div");
                 slot.className = "bd-batch-ref";
+                slot.dataset.refKind = "image";
+                slot.dataset.refIndex = String(i);
                 renderRefSlot(slot, ref, i, index, editor);
                 slot.onclick = () => {
                     if (editor._batchRefDragMoved) {
@@ -1961,7 +2050,9 @@ export function renderImageBatchGroups(editor) {
                     audios: on
                         ? mergeMediaByIndex(g.refAudios || [], live.refAudios || [])
                         : (live.refAudios || []),
-                    videos: live.refVideos || [],
+                    videos: on
+                        ? mergeMediaByIndex(g.refVideos || [], live.refVideos || [])
+                        : (live.refVideos || []),
                 };
             });
         }
@@ -1980,6 +2071,7 @@ export function renderImageBatchGroups(editor) {
 
         list.appendChild(card);
     });
+    refreshPromptTokenEditors(list);
     // Batch list is scroll-capped; refresh node/widget height after card count changes.
     editor.updateDomWidgetHeight?.();
 }

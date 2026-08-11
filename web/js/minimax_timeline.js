@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     CUSTOM_ASPECT_RATIO,
@@ -19,6 +19,7 @@ import {
     MAX_GEN_FRAMES,
     MAX_REFERENCE_AUDIOS,
     MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_VIDEOS,
     MINIMAX_CANVAS_MULTIPLE,
     minFrameCount,
     newBatchSegment,
@@ -28,6 +29,7 @@ import {
     clampMegapixels,
     refAudioLabel,
     refImageLabel,
+    refVideoLabel,
     RESOLUTION_ASPECTS,
     resolutionFromSelector,
     resolveTaskKey,
@@ -84,7 +86,7 @@ import {
     updateFl2vDetailUI,
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
-import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
+import { mountPromptImageMentions, refreshPromptTokenEditors } from "./minimax_prompt_mentions.js";
 import {
     applyI18nDom,
     aspectDisplayLabel,
@@ -274,6 +276,11 @@ function stripTimelineEphemeralFields(timeline) {
             refAudios: Array.isArray(timeline.global.refAudios)
                 ? timeline.global.refAudios.map(sanitizeRefAudio)
                 : [],
+            refVideos: Array.isArray(timeline.global.refVideos)
+                ? timeline.global.refVideos.map(sanitizeRefVideo)
+                : (Array.isArray(timeline.global.ref_videos)
+                    ? timeline.global.ref_videos.map(sanitizeRefVideo)
+                    : []),
             referenceVideo: timeline.global.referenceVideo
                 ? {
                     videoFile: timeline.global.referenceVideo.videoFile || "",
@@ -497,6 +504,7 @@ const STYLES = `
 .bd-panel.bd-r2v-common-panel .bd-refs-col{height:auto;min-height:0}
 .bd-panel.bd-r2v-common-panel .bd-rv2v-layout .bd-ref{min-height:72px}
 .bd-panel.bd-r2v-common-panel .bd-rv2v-layout .bd-ref-audio{min-height:44px}
+.bd-panel.bd-r2v-common-panel .bd-rv2v-layout .bd-ref-video{min-height:0}
 .bd-player{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%}
 .bd-btn{background:#222;color:#e0e0e0;border:1px solid #111;border-radius:4px;padding:6px 12px;font-size:11px;line-height:1.35;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center}
 .bd-actions>.bd-btn{height:29px;min-height:29px}
@@ -576,6 +584,8 @@ const STYLES = `
 .bd-rv2v-layout .bd-prompt-col .bd-label,.bd-v2v-layout .bd-prompt-col .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.02em}
 .bd-wrap.locale-en .bd-rv2v-layout .bd-prompt-col .bd-label,.bd-wrap.locale-en .bd-v2v-layout .bd-prompt-col .bd-label{text-transform:uppercase;letter-spacing:.08em}
 .bd-prompt{width:100%;min-height:96px;background:#181818;border:1px solid #333;border-radius:6px;color:#eee;padding:8px;resize:vertical;font-size:12px;box-sizing:border-box;font-family:inherit;line-height:1.35;flex:1}
+.bd-prompt-col .bd-token-wrap{flex:1 1 auto;min-height:96px;width:100%}
+.bd-ref.bd-ref-flash,.bd-batch-ref.bd-ref-flash,.bd-ref-audio.bd-ref-flash,.bd-batch-audio.bd-ref-flash,.bd-batch-video.bd-ref-flash{outline:2px solid #4fff8f;outline-offset:1px;border-color:#4fff8f!important}
 .bd-rv2v-layout .bd-prompt,.bd-v2v-layout .bd-prompt{min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-v2v-layout .bd-prompt{min-height:180px}
 .bd-prompt-negative{display:none!important}
@@ -600,7 +610,7 @@ const STYLES = `
 .bd-rv2v-layout .bd-ref .x{top:4px;right:4px;width:20px;height:20px;border-radius:6px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);color:#ff9a9a;font-size:14px;font-weight:700;z-index:3}
 .bd-rv2v-layout .bd-ref:hover .x,.bd-rv2v-layout .bd-ref:focus-within .x{display:flex}
 .bd-rv2v-layout .bd-ref.bd-r2v-pic-hidden{display:none!important}
-.bd-rv2v-layout .bd-refs-images-wrap,.bd-rv2v-layout .bd-ref-audios-wrap{margin-top:0}
+.bd-rv2v-layout .bd-refs-images-wrap,.bd-rv2v-layout .bd-ref-audios-wrap,.bd-rv2v-layout .bd-ref-videos-wrap{margin-top:0}
 .bd-select{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:4px 6px;font-size:11px;max-width:240px;box-sizing:border-box}
 .bd-actions>.bd-select{padding:6px 10px;font-size:11px;line-height:1.35;height:29px;min-height:29px;max-width:min(480px,55vw)}
 .bd-ref img{width:100%;height:100%;object-fit:cover}
@@ -641,27 +651,29 @@ const STYLES = `
 .bd-ref-video-col{display:flex;flex-direction:column;gap:4px;min-width:0;width:100%;flex:1}
 .bd-ref-video-col .bd-gen-src{min-height:140px;max-height:none;flex:1}
 .bd-ref-video-name{word-break:break-all;line-height:1.3}
-.bd-ref-audios-wrap{display:flex;flex-direction:column;gap:4px;margin-top:6px;width:100%}
-.bd-ref-audios{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;width:100%}
-.bd-rv2v-layout .bd-ref-audios{gap:7px}
-.bd-ref-audio{position:relative;min-height:52px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;padding:6px 4px;box-sizing:border-box;font-size:9px;color:#666;text-align:center;line-height:1.25}
-.bd-rv2v-layout .bd-ref-audio{min-height:0;height:auto;align-items:stretch;justify-content:flex-start;gap:6px;padding:6px;border-radius:8px;border:1px dashed #333;background:#080808;text-align:left;font-size:11px;color:#777}
-.bd-ref-audio.has-audio{border-style:solid;border-color:#4a6a4a;color:#cfe;background:#152015}
-.bd-rv2v-layout .bd-ref-audio.has-audio{border-color:#2f4a38;background:#101812;color:#d8ebe0}
-.bd-ref-audio:hover{border-color:#7a9cff;background:#1a1a1a}
-.bd-rv2v-layout .bd-ref-audio:hover{border-color:#555;background:#101010}
-.bd-ref-audio.has-audio:hover{background:#1a2a1a}
+.bd-ref-audios-wrap,.bd-ref-videos-wrap{display:flex;flex-direction:column;gap:4px;margin-top:6px;width:100%}
+.bd-ref-audios,.bd-ref-videos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;width:100%}
+.bd-rv2v-layout .bd-ref-audios,.bd-rv2v-layout .bd-ref-videos{gap:7px}
+.bd-ref-audio,.bd-ref-video{position:relative;min-height:52px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;padding:6px 4px;box-sizing:border-box;font-size:9px;color:#666;text-align:center;line-height:1.25}
+.bd-rv2v-layout .bd-ref-audio,.bd-rv2v-layout .bd-ref-video{min-height:0;height:auto;align-items:stretch;justify-content:flex-start;gap:6px;padding:6px;border-radius:8px;border:1px dashed #333;background:#080808;text-align:left;font-size:11px;color:#777}
+.bd-ref-audio.has-audio,.bd-ref-video.has-video{border-style:solid;border-color:#4a6a4a;color:#cfe;background:#152015}
+.bd-rv2v-layout .bd-ref-audio.has-audio,.bd-rv2v-layout .bd-ref-video.has-video{border-color:#2f4a38;background:#101812;color:#d8ebe0}
+.bd-ref-audio:hover,.bd-ref-video:hover{border-color:#7a9cff;background:#1a1a1a}
+.bd-rv2v-layout .bd-ref-audio:hover,.bd-rv2v-layout .bd-ref-video:hover{border-color:#555;background:#101010}
+.bd-ref-audio.has-audio:hover,.bd-ref-video.has-video:hover{background:#1a2a1a}
 .bd-rv2v-layout .bd-ref-audio .bd-r2v-thumb{width:100%;height:44px;border-radius:6px}
-.bd-rv2v-layout .bd-ref-audio.has-audio .bd-r2v-thumb{border-color:#3a5a45;color:#8fdfb0;background:#152018}
-.bd-rv2v-layout .bd-ref-audio .bd-r2v-meta{flex-direction:row;align-items:center;justify-content:space-between;gap:4px}
+.bd-rv2v-layout .bd-ref-video .bd-r2v-thumb,.bd-rv2v-layout .bd-ref-video .bd-r2v-thumb-video{width:100%;height:auto;aspect-ratio:16/9;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#0c1014;border:1px solid #222;color:#6a7a8a;position:relative}
+.bd-rv2v-layout .bd-ref-audio.has-audio .bd-r2v-thumb,.bd-rv2v-layout .bd-ref-video.has-video .bd-r2v-thumb{border-color:#3a5a45;color:#8fdfb0;background:#152018}
+.bd-rv2v-layout .bd-ref-audio .bd-r2v-meta,.bd-rv2v-layout .bd-ref-video .bd-r2v-meta{flex-direction:row;align-items:center;justify-content:space-between;gap:4px}
 .bd-rv2v-layout .bd-ref-audio audio.bd-r2v-media{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
+.bd-rv2v-layout .bd-ref-video video.bd-r2v-media{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none}
 .bd-ref-audio .bd-ref-audio-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ad;font-size:9px;padding:0 2px}
-.bd-rv2v-layout .bd-ref-audio .bd-ref-audio-name,.bd-rv2v-layout .bd-ref-audio .name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#666;font-size:10px;padding:0}
-.bd-ref-audio .x{position:absolute;top:1px;right:3px;color:#f88;font-size:12px;line-height:1;display:none}
-.bd-rv2v-layout .bd-ref-audio .x{top:8px;right:8px;width:20px;height:20px;border-radius:6px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);color:#ff9a9a;font-size:14px;font-weight:700;z-index:3}
-.bd-ref-audio:hover .x{display:block}
-.bd-rv2v-layout .bd-ref-audio:hover .x{display:flex}
-.bd-rv2v-layout .bd-refs-images-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-audios-wrap.bd-r2v-section{display:flex;flex-direction:column;gap:8px}
+.bd-rv2v-layout .bd-ref-audio .bd-ref-audio-name,.bd-rv2v-layout .bd-ref-audio .name,.bd-rv2v-layout .bd-ref-video .name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#666;font-size:10px;padding:0}
+.bd-ref-audio .x,.bd-ref-video .x{position:absolute;top:1px;right:3px;color:#f88;font-size:12px;line-height:1;display:none}
+.bd-rv2v-layout .bd-ref-audio .x,.bd-rv2v-layout .bd-ref-video .x{top:8px;right:8px;width:20px;height:20px;border-radius:6px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);color:#ff9a9a;font-size:14px;font-weight:700;z-index:3}
+.bd-ref-audio:hover .x,.bd-ref-video:hover .x{display:block}
+.bd-rv2v-layout .bd-ref-audio:hover .x,.bd-rv2v-layout .bd-ref-video:hover .x{display:flex}
+.bd-rv2v-layout .bd-refs-images-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-audios-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-videos-wrap.bd-r2v-section{display:flex;flex-direction:column;gap:8px}
 .bd-r2v-section-count:empty{display:none}
 .bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-head{display:contents}
 .bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-count{display:none}
@@ -1098,6 +1110,10 @@ function parseTimeline(raw, totalFrames, fps) {
         };
         data.global.refs = data.global.refs || [];
         data.global.refAudios = data.global.refAudios || data.global.ref_audios || [];
+        data.global.refVideos = data.global.refVideos || data.global.ref_videos || [];
+        if (Array.isArray(data.global.refVideos)) {
+            data.global.refVideos = data.global.refVideos.map(sanitizeRefVideo);
+        }
         data.global.referenceVideo = data.global.referenceVideo || data.global.reference_video || {};
         data.global.continuousReference = !!data.global.continuousReference || !!data.global.continuous_reference;
         // r2v shared params: default OFF unless explicitly enabled.
@@ -1856,8 +1872,17 @@ class MiniMaxH3DirectorEditor {
         this._syncTimer = setTimeout(() => this._writeTimelineWidget(), TIMELINE_SYNC_DEBOUNCE_MS);
     }
 
+    _flushPromptTokenEditors() {
+        this.globalPrompt?.__bdTokenApi?.sync?.();
+        this.segPrompt?.__bdTokenApi?.sync?.();
+        refreshPromptTokenEditors(this.root || document);
+    }
+
     _writeTimelineWidget() {
         if (!this.timelineWidget) return;
+        // Token editors keep textarea.value in sync on blur/input; force-flush
+        // before serialize so a focused editor cannot drop the latest draft.
+        this._flushPromptTokenEditors();
         // Batch prompt textareas can lag behind segment objects after duration
         // normalize — always harvest DOM drafts before serializing timeline_data.
         if (this.isImageBatch?.()) flushBatchPromptInputs(this);
@@ -2074,7 +2099,7 @@ class MiniMaxH3DirectorEditor {
                     </div>
                 </div>
                 <div class="bd-r2v-common-body" data-r="r2v-common-body">
-                    <div class="bd-meta bd-r2v-common-hint hidden" data-r="r2v-common-hint" data-i18n="panel.r2vCommonHint">公共参考图/音频供各组读取；公共提示词会与每组提示词拼接成完整提示词。同槽位以组内素材优先。</div>
+                    <div class="bd-meta bd-r2v-common-hint hidden" data-r="r2v-common-hint" data-i18n="panel.r2vCommonHint">公共参考图/视频/音频供各组读取；公共提示词会与每组提示词拼接成完整提示词。同槽位以组内素材优先。</div>
                     <div class="bd-prompt-layout" data-r="global-prompt-layout">
                         <div class="bd-refs-col" data-r="global-refs-col">
                             <div class="bd-refs-images-wrap" data-r="global-refs-images-wrap">
@@ -2083,6 +2108,13 @@ class MiniMaxH3DirectorEditor {
                                     <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
                                 </div>
                                 <div class="bd-refs" data-r="global-refs"></div>
+                            </div>
+                            <div class="bd-ref-videos-wrap hidden" data-r="global-ref-videos-wrap">
+                                <div class="bd-r2v-section-head" data-r="global-videos-head">
+                                    <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionVideos">参考视频</span>
+                                    <span class="bd-r2v-section-count" data-r="global-videos-count"></span>
+                                </div>
+                                <div class="bd-ref-videos" data-r="global-ref-videos"></div>
                             </div>
                             <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-audios-head">
@@ -2241,6 +2273,9 @@ class MiniMaxH3DirectorEditor {
         this.segAudiosCount = this.root.querySelector('[data-r="seg-audios-count"]');
         this.globalRefAudiosWrap = this.root.querySelector('[data-r="global-ref-audios-wrap"]');
         this.globalRefAudiosBox = this.root.querySelector('[data-r="global-ref-audios"]');
+        this.globalRefVideosWrap = this.root.querySelector('[data-r="global-ref-videos-wrap"]');
+        this.globalRefVideosBox = this.root.querySelector('[data-r="global-ref-videos"]');
+        this.globalVideosCount = this.root.querySelector('[data-r="global-videos-count"]');
         this.segRefAudiosWrap = this.root.querySelector('[data-r="seg-ref-audios-wrap"]');
         this.segRefAudiosBox = this.root.querySelector('[data-r="seg-ref-audios"]');
         this.segLabel = this.root.querySelector('[data-r="seg-label"]');
@@ -2418,11 +2453,12 @@ class MiniMaxH3DirectorEditor {
                 stopDomEvent(e);
                 if (!this.usesR2vCommonPanel()) return;
                 this.timeline.global = this.timeline.global || {
-                    refs: [], refAudios: [], prompt: "",
+                    refs: [], refAudios: [], refVideos: [], prompt: "",
                     commonEnabled: false, commonCollapsed: false,
                 };
                 this.timeline.global.refs = this.timeline.global.refs || [];
                 this.timeline.global.refAudios = this.timeline.global.refAudios || [];
+                this.timeline.global.refVideos = this.timeline.global.refVideos || [];
                 const nextOn = !this.isR2vCommonEnabled();
                 this.timeline.global.commonEnabled = nextOn;
                 // Enable → expand; disable → collapse and stop runtime merge.
@@ -3172,7 +3208,7 @@ class MiniMaxH3DirectorEditor {
         this.globalPromptLayout?.classList.toggle("bd-v2v-layout", globalV2vStyle);
         this.segPromptLayout?.classList.toggle("bd-v2v-layout", segV2vStyle);
 
-        for (const wrap of [this.globalRefsImagesWrap, this.globalRefAudiosWrap]) {
+        for (const wrap of [this.globalRefsImagesWrap, this.globalRefAudiosWrap, this.globalRefVideosWrap]) {
             wrap?.classList.toggle("bd-r2v-section", globalRefStyle);
         }
         for (const wrap of [this.segRefsImagesWrap, this.segRefAudiosWrap]) {
@@ -3196,13 +3232,16 @@ class MiniMaxH3DirectorEditor {
         const globalKey = this.getTaskKey();
         const showGlobalRefs = !hideTimeline && taskUsesReferenceImages(globalKey);
         const showGlobalRefAudios = !hideTimeline && taskUsesReferenceAudios(globalKey);
+        // r2v common panel: multi-slot ref videos (distinct from ads2v single referenceVideo).
+        const showGlobalR2vVideos = !hideTimeline && this.usesR2vCommonPanel();
         const showGlobalRefVideo = !hideTimeline && taskUsesReferenceVideo(globalKey);
 
         this.globalRefsCol?.classList.toggle(
             "hidden",
-            !showGlobalRefs && !showGlobalRefVideo && !showGlobalRefAudios,
+            !showGlobalRefs && !showGlobalRefVideo && !showGlobalRefAudios && !showGlobalR2vVideos,
         );
         this.globalRefsImagesWrap?.classList.toggle("hidden", !showGlobalRefs);
+        this.globalRefVideosWrap?.classList.toggle("hidden", !showGlobalR2vVideos);
         this.globalRefAudiosWrap?.classList.toggle("hidden", !showGlobalRefAudios);
         this.globalRefVideoCol?.classList.toggle("hidden", !showGlobalRefVideo);
         if (this.globalPanelTitle) {
@@ -3244,6 +3283,7 @@ class MiniMaxH3DirectorEditor {
         }
         this.syncRv2vRefLayoutClasses({ hideTimeline, seg });
         if (showGlobalRefVideo || showSegRefVideo) this.renderRefVideoSlot();
+        if (showGlobalR2vVideos) this.renderR2vCommonVideoSlots();
         if (showGlobalRefAudios || showSegRefAudios) this.renderRefAudioSlots();
     }
 
@@ -4516,6 +4556,7 @@ class MiniMaxH3DirectorEditor {
             }
         }
         if (taskUsesReferenceAudios(this.getTaskKey())) this.renderRefAudioSlots?.();
+        if (this.usesR2vCommonPanel?.()) this.renderR2vCommonVideoSlots?.();
         this.scheduleRender?.();
         this.node?.setDirtyCanvas?.(true, true);
     }
@@ -7753,6 +7794,10 @@ class MiniMaxH3DirectorEditor {
             this.timeline.global.refAudios = this.timeline.global.refAudios || [];
             this.renderRefAudioSlots();
         }
+        if (this.usesGlobalRefPanel() && this.usesR2vCommonPanel()) {
+            this.timeline.global.refVideos = this.timeline.global.refVideos || [];
+            this.renderR2vCommonVideoSlots();
+        }
         const refVideoKey = this.usesGlobalRefPanel()
             ? this.getTaskKey()
             : resolveTaskKey(seg?.taskType || this.timeline.global?.taskType || this.getTaskKey());
@@ -7842,6 +7887,8 @@ class MiniMaxH3DirectorEditor {
             el.className = "bd-ref";
             if (polished && i >= visible) el.classList.add("bd-r2v-pic-hidden");
             el.dataset.refSlot = String(i);
+            el.dataset.refKind = "image";
+            el.dataset.refIndex = String(i);
             el.dataset.refScope = isGlobal ? "global" : "seg";
             const label = refImageLabel(i);
             el.title = t("ref.slotTitle", { label });
@@ -7930,6 +7977,7 @@ class MiniMaxH3DirectorEditor {
             };
             wrap.appendChild(toggle);
         }
+        refreshPromptTokenEditors(this.root || document);
     }
 
     _bindRefSlotDnD(el, target, slotIndex, isGlobal) {
@@ -8044,6 +8092,8 @@ class MiniMaxH3DirectorEditor {
             const el = document.createElement("div");
             el.className = "bd-ref-audio";
             el.dataset.audioSlot = String(i);
+            el.dataset.refKind = "audio";
+            el.dataset.refIndex = String(i);
             const label = refAudioLabel(i);
             const ref = (target.refAudios || []).find((r) => Number(r.index ?? r.slot) === i);
             const file = ref?.audioFile || ref?.fileName || "";
@@ -8130,6 +8180,7 @@ class MiniMaxH3DirectorEditor {
             };
             box.appendChild(el);
         }
+        refreshPromptTokenEditors(this.root || document);
     }
 
     removeRefAudio(target, index) {
@@ -8182,6 +8233,180 @@ class MiniMaxH3DirectorEditor {
         } catch (err) {
             console.error("[MiniMax H3Director] ref audio upload failed:", err);
             alert(t("upload.refAudioFailed", { err: err?.message || err }));
+        }
+    }
+
+    /** r2v common panel: multi-slot global.refVideos (1–3), merged into groups at run time. */
+    renderR2vCommonVideoSlots() {
+        const box = this.globalRefVideosBox;
+        if (!box || !this.usesR2vCommonPanel()) return;
+        const target = (this.timeline.global = this.timeline.global || {
+            refs: [], refAudios: [], refVideos: [],
+        });
+        target.refVideos = target.refVideos || [];
+        let filled = 0;
+        for (const r of target.refVideos) {
+            if (r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked) {
+                filled += 1;
+            }
+        }
+        if (this.globalVideosCount) {
+            this.globalVideosCount.textContent = `${filled}/${MAX_REFERENCE_VIDEOS}`;
+        }
+        box.innerHTML = "";
+        for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
+            const el = document.createElement("div");
+            el.className = "bd-ref-video";
+            el.dataset.videoSlot = String(i);
+            el.dataset.refKind = "video";
+            el.dataset.refIndex = String(i);
+            const label = refVideoLabel(i);
+            const ref = (target.refVideos || []).find((r) => Number(r.index ?? r.slot) === i);
+            const file = ref?.videoFile || "";
+            const posterSrc = ref?.previewImageUrl
+                || (ref?.previewImageFile ? refViewUrl(ref.previewImageFile) : "");
+            const hasMedia = !!(file || posterSrc || ref?.linked);
+            const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
+            el.title = hasMedia
+                ? t("ref.videoTitleFilled", { label, file: titleFile || label })
+                : t("ref.videoTitleEmpty", { label });
+            const thumb = document.createElement("div");
+            thumb.className = "bd-r2v-thumb bd-r2v-thumb-video";
+            const meta = document.createElement("div");
+            meta.className = "bd-r2v-meta";
+            const tag = document.createElement("span");
+            tag.className = "tag";
+            tag.textContent = label;
+            meta.appendChild(tag);
+            el.appendChild(thumb);
+            el.appendChild(meta);
+            if (file) {
+                el.classList.add("has-video");
+                const video = document.createElement("video");
+                video.preload = "metadata";
+                video.muted = true;
+                video.playsInline = true;
+                video.src = refViewUrl(file);
+                video.className = "bd-r2v-media";
+                thumb.appendChild(video);
+                const playBtn = document.createElement("button");
+                playBtn.type = "button";
+                playBtn.className = "bd-r2v-play";
+                playBtn.title = t("batch.r2v.play");
+                playBtn.textContent = "▶";
+                thumb.appendChild(playBtn);
+                const dur = document.createElement("span");
+                dur.className = "bd-r2v-dur";
+                dur.textContent = ref?.durationSec != null
+                    ? formatMediaDuration(ref.durationSec)
+                    : "--:--";
+                meta.appendChild(dur);
+                bindR2vMediaPlayback(video, playBtn);
+                playBtn.addEventListener("click", () => { video.muted = false; });
+                wireMediaDuration(video, dur, (sec) => {
+                    if (ref) ref.durationSec = sec;
+                });
+                video.addEventListener("loadeddata", () => {
+                    if (video.readyState >= 2 && video.currentTime < 0.05) {
+                        try {
+                            video.currentTime = Math.min(0.1, (video.duration || 1) * 0.05);
+                        } catch (_) { /* ignore */ }
+                    }
+                }, { once: true });
+                const x = document.createElement("span");
+                x.className = "x";
+                x.textContent = "×";
+                x.onclick = (e) => {
+                    e.stopPropagation();
+                    this.removeR2vCommonVideo(i);
+                };
+                el.appendChild(x);
+            } else if (posterSrc) {
+                el.classList.add("has-video");
+                const img = document.createElement("img");
+                img.className = "bd-r2v-media";
+                img.src = posterSrc;
+                img.alt = label;
+                thumb.appendChild(img);
+                const hint = document.createElement("span");
+                hint.className = "name";
+                hint.textContent = t("batch.r2v.externalPoster");
+                meta.appendChild(hint);
+            } else {
+                thumb.textContent = "▶";
+                const hint = document.createElement("span");
+                hint.className = "name";
+                hint.textContent = t("batch.r2v.uploadHint");
+                meta.appendChild(hint);
+            }
+            el.onclick = (e) => {
+                if (e.target?.closest?.(".bd-r2v-play, .bd-r2v-dur, .x, video")) return;
+                if (file && e.target?.closest?.(".bd-r2v-thumb")) {
+                    el.querySelector(".bd-r2v-play")?.click();
+                    return;
+                }
+                this.pickR2vCommonVideo(i);
+            };
+            box.appendChild(el);
+        }
+        refreshPromptTokenEditors(this.root || document);
+    }
+
+    removeR2vCommonVideo(index) {
+        const target = this.timeline.global;
+        if (!target) return;
+        target.refVideos = (target.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== index);
+        if (this.isR2vCommonEnabled()) {
+            rebaseR2vGroupSlotsForCommon(this);
+            this.renderImageBatchGroups?.();
+        }
+        this.commit();
+        this.renderR2vCommonVideoSlots();
+    }
+
+    pickR2vCommonVideo(index) {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "video/*,.mp4,.mov,.webm,.mkv";
+        input.onchange = () => {
+            const file = input.files?.[0];
+            if (file) this.addR2vCommonVideoFromFile(file, index);
+        };
+        input.click();
+    }
+
+    async addR2vCommonVideoFromFile(file, slotIndex = null) {
+        if (!file) return;
+        const target = (this.timeline.global = this.timeline.global || {
+            refs: [], refAudios: [], refVideos: [],
+        });
+        target.refVideos = target.refVideos || [];
+        let index = slotIndex;
+        if (index == null) {
+            index = Array.from({ length: MAX_REFERENCE_VIDEOS }, (_, i) => i)
+                .find((i) => !target.refVideos.some((r) => Number(r.index ?? r.slot) === i));
+            if (index == null) return;
+        }
+        try {
+            const uploaded = await uploadToInputSmart(file);
+            const relPath = videoRelativePath(uploaded);
+            target.refVideos = target.refVideos.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refVideos.push({
+                index,
+                videoFile: relPath,
+                fileName: uploaded?.name || file.name,
+                type: "input",
+                subfolder: uploaded?.subfolder || "",
+            });
+            if (this.isR2vCommonEnabled()) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
+            this.commit();
+            this.renderR2vCommonVideoSlots();
+        } catch (err) {
+            console.error("[MiniMax H3Director] common ref video upload failed:", err);
+            alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
         }
     }
 
