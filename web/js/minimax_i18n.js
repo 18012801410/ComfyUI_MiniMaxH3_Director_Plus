@@ -126,6 +126,7 @@ const ZH = {
     "panel.fl2v.startRequired": "首帧<br>可选",
     "panel.fl2v.endOptional": "尾帧<br>可选",
     "fl2v.badge.startEnd": "首尾帧",
+    "fl2v.badge.endOnly": "仅尾帧",
     "fl2v.badge.i2v": "图生视频",
 
     "batch.refVideo": "参考视频 (视频1–3)",
@@ -504,6 +505,7 @@ const EN = {
     "panel.fl2v.startRequired": "Start<br>optional",
     "panel.fl2v.endOptional": "End<br>optional",
     "fl2v.badge.startEnd": "Start+End",
+    "fl2v.badge.endOnly": "End only",
     "fl2v.badge.i2v": "I2V",
 
     "batch.refVideo": "Reference video (Video 1–3)",

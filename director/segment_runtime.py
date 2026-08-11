@@ -32,6 +32,12 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if getattr(seg, "task_key", "") == "t2v":
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
+    # fl2v end-only: plan leaves source_clip=None on purpose. Do not slice the
+    # placeholder gen source_video (len=segment_count gray frames) — that was
+    # incorrectly becoming first_frame in the single-node path.
+    if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+
     sv = plan.source_video
     if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
         start = max(0, int(seg.start_frame))
@@ -63,6 +69,9 @@ def resolve_segment_raw_clip_with_lookahead(
     if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
         # Gen canvases have no timeline lookahead beyond the clip itself.
         return seg.source_clip.clone()
+
+    if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     end = int(seg.end_frame) + extra
     sv = plan.source_video

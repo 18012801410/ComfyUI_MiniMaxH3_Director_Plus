@@ -406,6 +406,7 @@ def _normalize_keyframes(raw: list[dict] | None) -> list[dict]:
                 or DEFAULT_FL2V_NEGATIVE,
                 "isStartFrame": is_start,
                 "isEndFrame": is_end,
+                "endOnly": _as_bool(item.get("endOnly") or item.get("end_only")),
                 "_breakBefore": _as_bool(
                     item.get("breakBefore") or item.get("break_before") or item.get("disconnect")
                 ),
@@ -463,19 +464,33 @@ def _expand_shots(keyframes: list[dict]) -> list[dict[str, Any]]:
         if not kf.get("isStartFrame"):
             continue
         if kf.get("isEndFrame"):
-            # Self-paired 首尾同图: sample this clip alone.
             fc = _shot_sample_frame_count(kf, None)
-            shots.append(
-                {
-                    "source_index": i,
-                    "start": kf,
-                    "end": kf,
-                    "frameCount": fc,
-                    "timeline_start": int(kf.get("start") or 0),
-                    "prompt": kf.get("prompt") or "",
-                    "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
-                }
-            )
+            if kf.get("endOnly"):
+                # Official last-only: image1 only (no image0).
+                shots.append(
+                    {
+                        "source_index": i,
+                        "start": None,
+                        "end": kf,
+                        "frameCount": fc,
+                        "timeline_start": int(kf.get("start") or 0),
+                        "prompt": kf.get("prompt") or "",
+                        "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
+                    }
+                )
+            else:
+                # Self-paired 首尾同图: sample this clip alone.
+                shots.append(
+                    {
+                        "source_index": i,
+                        "start": kf,
+                        "end": kf,
+                        "frameCount": fc,
+                        "timeline_start": int(kf.get("start") or 0),
+                        "prompt": kf.get("prompt") or "",
+                        "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
+                    }
+                )
             continue
         end = None
         for j in range(i + 1, n):

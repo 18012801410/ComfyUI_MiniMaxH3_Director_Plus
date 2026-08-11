@@ -121,14 +121,20 @@ def _build_minimax_inputs(
     ref_video_audios = None
 
     if task_key == "fl2v":
-        if clip_frames is not None and clip_frames.shape[0] >= 1:
-            first_frame = clip_frames[:1]
-        if clip_frames is not None and clip_frames.shape[0] >= 2:
-            last_frame = clip_frames[-1:].clone()
-        if first_frame is None:
-            first_frame = _ref_tensor_from_seg_refs(seg.refs, 0)
-        if last_frame is None:
-            last_frame = _ref_tensor_from_seg_refs(seg.refs, 1)
+        # Prefer explicit shot refs (index 0=start, 1=end). Official FL2VA allows
+        # end-only — never invent a first_frame from the placeholder gen source_video
+        # (1×16×16 gray) or a held clip when refs only carry image1.
+        first_frame = _ref_tensor_from_seg_refs(seg.refs, 0)
+        last_frame = _ref_tensor_from_seg_refs(seg.refs, 1)
+        if first_frame is None and last_frame is None and clip_frames is not None:
+            if clip_frames.shape[0] >= 1:
+                first_frame = clip_frames[:1]
+            if clip_frames.shape[0] >= 2:
+                last_frame = clip_frames[-1:].clone()
+        elif first_frame is not None and last_frame is None and clip_frames is not None:
+            # Start+end endpoint hold: last may only live on the clip tail.
+            if clip_frames.shape[0] >= 2:
+                last_frame = clip_frames[-1:].clone()
     elif task_key == "i2v":
         # Explicit per-segment image wins; motion-context path leaves first_frame empty
         # so the previous tail can be pinned as a multi-frame head instead.
