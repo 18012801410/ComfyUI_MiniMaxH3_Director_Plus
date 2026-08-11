@@ -1,4 +1,4 @@
-/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
+﻿/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
  *
  * Canonical storage is always the official MiniMax tag string (textarea.value).
  * The visible surface is a contenteditable that renders atomic bd-token chips.
@@ -648,6 +648,10 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         menu = document.createElement("div");
         menu.className = "bd-mention-menu hidden";
         menu.setAttribute("role", "listbox");
+        // Keep editor focus while interacting with the menu / scrollbar.
+        menu.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+        });
         document.body.appendChild(menu);
         return menu;
     };
@@ -702,6 +706,33 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         }
         positionMenu(m, rich);
         m.classList.remove("hidden");
+        scrollActiveIntoView();
+    };
+
+    const scrollActiveIntoView = () => {
+        if (!menu || menu.classList.contains("hidden")) return;
+        const row = menu.querySelector(`.bd-mention-item[data-index="${activeIndex}"]`);
+        if (!row) return;
+        // Adjust only the menu scroller — scrollIntoView would move page ancestors
+        // and trip the capture scroll listener that closes the menu.
+        const menuRect = menu.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        if (rowRect.bottom > menuRect.bottom) {
+            menu.scrollTop += rowRect.bottom - menuRect.bottom + 4;
+        } else if (rowRect.top < menuRect.top) {
+            menu.scrollTop -= menuRect.top - rowRect.top + 4;
+        }
+    };
+
+    /** Move highlight without rebuilding the list (keeps scroll position). */
+    const moveActive = (delta) => {
+        if (!filtered.length || !menu || menu.classList.contains("hidden")) return;
+        const prev = activeIndex;
+        activeIndex = (activeIndex + delta + filtered.length) % filtered.length;
+        menu.querySelector(`.bd-mention-item[data-index="${prev}"]`)?.classList.remove("active");
+        const next = menu.querySelector(`.bd-mention-item[data-index="${activeIndex}"]`);
+        next?.classList.add("active");
+        scrollActiveIntoView();
     };
 
     const insertMention = (tag) => {
@@ -776,18 +807,12 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         if (!menu?.classList.contains("hidden") && filtered.length) {
             if (e.key === "ArrowDown") {
                 e.preventDefault();
-                activeIndex = (activeIndex + 1) % filtered.length;
-                const { before, offset } = textBeforeCaret(rich);
-                const q = before.slice(mentionStart + 1, offset);
-                renderMenu(q);
+                moveActive(1);
                 return;
             }
             if (e.key === "ArrowUp") {
                 e.preventDefault();
-                activeIndex = (activeIndex - 1 + filtered.length) % filtered.length;
-                const { before, offset } = textBeforeCaret(rich);
-                const q = before.slice(mentionStart + 1, offset);
-                renderMenu(q);
+                moveActive(-1);
                 return;
             }
             if (e.key === "Enter" || e.key === "Tab") {
@@ -858,11 +883,19 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
 
     document.addEventListener("mousedown", (e) => {
         if (!menu || menu.classList.contains("hidden")) return;
-        if (e.target === rich || menu.contains(e.target)) return;
+        if (e.target === rich || rich.contains?.(e.target) || menu.contains(e.target)) return;
         closeMenu();
     });
 
-    window.addEventListener("scroll", closeMenu, true);
+    // Capture scroll closes the menu when the page/list moves — but must ignore
+    // scrolls inside the menu itself (overflow:auto), otherwise hovering/dragging
+    // the scrollbar instantly dismisses it.
+    window.addEventListener("scroll", (e) => {
+        if (!menu || menu.classList.contains("hidden")) return;
+        const t = e.target;
+        if (t === menu || menu.contains(t)) return;
+        closeMenu();
+    }, true);
     window.addEventListener("resize", closeMenu);
 
     textarea.__bdTokenApi = {

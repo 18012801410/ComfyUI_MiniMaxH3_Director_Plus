@@ -1,4 +1,4 @@
-import { app } from "../../scripts/app.js";
+﻿import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     CUSTOM_ASPECT_RATIO,
@@ -2611,8 +2611,19 @@ class MiniMaxH3DirectorEditor {
         this.root.addEventListener("mouseleave", () => { this._isHovering = false; });
         this._onKeyDown = (e) => {
             if (!this._isHovering) return;
-            const tag = document.activeElement?.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+            const el = document.activeElement;
+            const tag = el?.tagName;
+            // Prompt editors are contenteditable DIVs (bd-token-editor), not TEXTAREA —
+            // must ignore typing shortcuts there or Backspace deletes the asset group.
+            if (
+                tag === "INPUT"
+                || tag === "TEXTAREA"
+                || tag === "SELECT"
+                || el?.isContentEditable
+                || el?.closest?.('[contenteditable="true"], .bd-token-editor')
+            ) {
+                return;
+            }
             if ((e.key === "Delete" || e.key === "Backspace") && this.timeline.segments.length >= 1) {
                 // Split points only delete via the toolbar button; Delete removes segments.
                 if (this.selectedSplitFrame != null) {
