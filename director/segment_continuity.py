@@ -1,31 +1,12 @@
-"""Cross-segment continuity — **opt-in official Bernini path only**.
+"""Cross-segment continuity helpers for MiniMax H3 Director.
 
-When continuity is **off**: Studio / per-segment path — segment source + user refs
-→ BerniniConditioning → KSamplerAdvanced → VAEDecode. No cross-segment injection.
+Active path (opt-in「段间引导」): motion-context pin via
+``director.h3_motion_context`` — previous segment AV tail → next segment
+conditioning, then trim the pinned prefix.
+Tasks: t2v / i2v / fl2v / r2v / v2v / rv2v.
 
-When continuity is **on** (WanSCAIL-style handoff on the official Bernini stack):
-1. Prepend prev-tail pixels to ``source_video`` so canvas length matches generation
-2. Generate ``prefix + segment`` frames (Wan 4n+1), trim prefix after decode
-3. SCAIL latent prefix lock via ``noise_mask`` (prefix not resampled)
-4. Append **one** appearance ref frame to ``context_latents``
-5. Keep the timeline body in source order — do **not** MAD-skip leading body
-   frames (that deletes the SCAIL handoff and looks like continuity is off)
-6. Match source canvas length to ``gen_frames`` (lookahead / mirror) so Wan does not
-   sample hollow end frames that freeze the segment tail
-7. Carry ``noise_mask`` through **both** high and low sample stages (stripping it
-   in low stage was the main “continuity looks like OFF” regression)
-8. Hard SCAIL lock only (feather/soft-unlock OFF — those under-denoised → 画面花)
-9. Do **not** inject a second full motion stream (that duplicated / shifted
-   source_id channels and caused seam jumps + temporal stutter)
-10. Lead segment (index 0) still gets source lookahead when continuity is on,
-    so Wan 4n+1 does not invent a frozen tail used as the first handoff
-11. Prepend **and** SCAIL encode share the same luma-matched prev tail vs
-    source[0] (avoids under-denoise 画面花 from dual-track lock/conditioning)
-12. Mild cosine body bridge on opening (conditioning only)
-13. Free-latent warm-start with **mask=1.0 always** (partial mask → 花屏)
-14. **Settling burn-in** after lock (8f): discarded on export so hold→pop is
-    not in the timeline body; body stays source-aligned
-15. Concat: additive luma + light single-frame hold→pop
+Legacy Wan/SCAIL helpers below are retained for concat seam utilities and
+historical APIs; ``apply_scail_continuity_core`` is a no-op on MiniMax H3.
 """
 
 from __future__ import annotations
@@ -37,16 +18,18 @@ from typing import Any
 import torch
 
 from ..lib.image_prep import cat_frames_variable_size, fit_canvas, fit_long_edge
+from .h3_motion_context import (
+    CONTINUITY_TASK_KEYS,
+    DEFAULT_CONTEXT_FRAMES as DEFAULT_CONTINUITY_OVERLAP,
+    snap_context_frames,
+)
 from .plan import DirectorPlan, SegmentPlan, wan_align_frame_count
 from .segment_cache import load_segment_cache
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.continuity")
 
-CONTINUITY_TASK_KEYS = frozenset({"i2v", "fl2v"})
-
-DEFAULT_CONTINUITY_OVERLAP = 9
-MIN_CONTINUITY_OVERLAP = 1
-MAX_CONTINUITY_OVERLAP = 81
+MIN_CONTINUITY_OVERLAP = 5
+MAX_CONTINUITY_OVERLAP = 56
 # Last N frames of prev as appearance refs (hair/outfit pop at joins needs >1).
 MAX_CONTINUITY_REF_FRAMES = 2
 # Leading-body MAD skip disabled: on successful rv2v/SCAIL handoff the body
@@ -124,14 +107,22 @@ CONTINUITY_SPIKE_SCAN = 5
 CONTINUITY_HOLD_POP_ON_TAIL = False
 
 
+def _truthy_continuity_flag(value) -> bool:
+    """Accept bool/int/common string forms from UI or reloaded workflows."""
+    if value is True or value == 1:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return False
+
+
 def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[bool, int]:
     """Read segment continuity flags from timeline JSON (output only; default off)."""
     if segment_count < 2:
         return False, 0
     output = timeline.get("output") or {}
-    enabled = bool(
-        output.get("continuityEnabled") is True
-        or output.get("continuity_enabled") is True
+    enabled = _truthy_continuity_flag(
+        output.get("continuityEnabled", output.get("continuity_enabled"))
     )
     if not enabled:
         return False, 0
@@ -140,8 +131,7 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
         or output.get("continuity_overlap_frames")
         or DEFAULT_CONTINUITY_OVERLAP
     )
-    overlap = max(MIN_CONTINUITY_OVERLAP, min(MAX_CONTINUITY_OVERLAP, int(raw)))
-    return True, overlap
+    return True, snap_context_frames(raw)
 
 
 def resolve_continuity_lock_pixels(overlap_frames: int) -> int:
@@ -250,6 +240,12 @@ def match_clip_to_gen_length(clip: torch.Tensor, gen_frames: int) -> torch.Tenso
 
 
 def is_continuity_active(plan: DirectorPlan, seg: SegmentPlan) -> bool:
+    """True only when UI「段间引导」is ON and this segment should pin the previous.
+
+    When False, the executor must stay on the official MiniMax H3 path
+    (stock ImageToVideo / ReferenceToVideo, no motion-context pin/patch/trim).
+    Supported tasks: t2v / i2v / fl2v / r2v / v2v / rv2v.
+    """
     return (
         plan.continuity_enabled
         and plan.segment_count >= 2
@@ -281,7 +277,9 @@ def resolve_prev_segment_output(
     if prev_idx in completed:
         return completed[prev_idx]
     prev_seg = all_segments[prev_idx]
-    cached = load_segment_cache(node_id, prev_seg, plan)
+    # Stale-ok: partial re-run after pipeline/fingerprint churn still needs the
+    # previous render for motion context (better than failing or pinning gray).
+    cached = load_segment_cache(node_id, prev_seg, plan, allow_stale=True)
     if cached is not None:
         return cached
     if not plan.continuity_enabled:

@@ -6,7 +6,13 @@ import logging
 
 import torch
 
-from ..lib.image_prep import fit_canvas, fit_video_long_edge, cat_frames_variable_size, resolve_output_dimensions
+from ..lib.image_prep import (
+    assert_minimax_canvas,
+    cat_frames_variable_size,
+    fit_canvas,
+    fit_video_long_edge,
+    resolve_output_dimensions,
+)
 from ..lib.task_prompts import resolve_task_key
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.gen")
@@ -255,6 +261,8 @@ def build_gen_director_plan(
         _load_refs,
         _parse_run_selection,
         _resolve_export_mode,
+        concat_common_segment_prompt,
+        merge_indexed_refs,
         segment_ref_audios_for_context,
         segment_refs_for_context,
     )
@@ -274,6 +282,12 @@ def build_gen_director_plan(
     submode = gen_submode(timeline, task_key)
     prompt = global_block.get("prompt") or global_prompt or ""
     global_refs = _load_refs(global_block.get("refs") or [])
+    # r2v/r2i shared「公共参数」: off unless timeline.global.commonEnabled is set.
+    common_enabled = bool(
+        global_block.get("commonEnabled")
+        if global_block.get("commonEnabled") is not None
+        else global_block.get("common_enabled")
+    )
 
     output_block = timeline.get("output") or {}
     gen_block = timeline.get("gen") or {}
@@ -289,9 +303,10 @@ def build_gen_director_plan(
         out_mode = "fixed"
         fw = int(output_block.get("width") or timeline.get("width") or width or 0)
         fh = int(output_block.get("height") or timeline.get("height") or height or 0)
-        if fw < 16 or fh < 16:
+        if fw < 32 or fh < 32:
             raise ValueError(
-                "t2i / t2v / r2i / r2v require fixed output width and height (鈮?6, multiples of 16). "
+                "t2i / t2v / r2i / r2v require fixed output width and height "
+                "(≥32, multiples of 32 for MiniMax H3). "
                 "Set width and height in the generation timeline output panel."
             )
         out_w, out_h, ref_max, _ = resolve_output_dimensions(
@@ -315,6 +330,8 @@ def build_gen_director_plan(
             fixed_width=int(output_block.get("width") or timeline.get("width") or width),
             fixed_height=int(output_block.get("height") or timeline.get("height") or height),
         )
+
+    assert_minimax_canvas(out_w, out_h)
 
     export_mode = _resolve_export_mode(output_block)
     # Image prompt-batch (t2i/i2i/r2i) always merges to images list; video batch (t2v/i2v/r2v) respects export mode.
@@ -349,10 +366,20 @@ def build_gen_director_plan(
             seg_negative = ""
         else:
             use_global = False
-            seg_prompt = (seg_data.get("prompt") or "").strip() or prompt
             seg_task = seg_data.get("taskType") or seg_data.get("task_type") or task_type
-            # Segment / batch mode: only this group's refs 鈥?never inherit global.refs.
-            seg_refs = _load_refs(seg_data.get("refs") or [])
+            seg_task_key_preview = resolve_task_key(seg_task)
+            local_prompt = (seg_data.get("prompt") or "").strip()
+            # r2v/r2i + commonEnabled: shared prompt prefixes each group prompt.
+            if seg_task_key_preview in ("r2v", "r2i") and common_enabled:
+                seg_prompt = concat_common_segment_prompt(prompt, local_prompt)
+            else:
+                seg_prompt = local_prompt or prompt
+            # r2v/r2i + commonEnabled: merge shared global.refs; same slot → group wins.
+            local_refs = _load_refs(seg_data.get("refs") or [])
+            if seg_task_key_preview in ("r2v", "r2i") and common_enabled and global_refs:
+                seg_refs = merge_indexed_refs(global_refs, local_refs)
+            else:
+                seg_refs = local_refs
             seg_negative = (
                 (seg_data.get("negativePrompt") or seg_data.get("negative_prompt") or "").strip()
             )
@@ -373,23 +400,57 @@ def build_gen_director_plan(
                 _load_ref_audios(global_block.get("refAudios") or global_block.get("ref_audios") or []),
             )
         else:
-            seg_ref_audios = segment_ref_audios_for_context(
+            local_audios = segment_ref_audios_for_context(
                 seg_task_key,
                 _load_ref_audios(seg_data.get("refAudios") or seg_data.get("ref_audios") or []),
             )
+            if seg_task_key == "r2v" and common_enabled:
+                common_audios = segment_ref_audios_for_context(
+                    seg_task_key,
+                    _load_ref_audios(
+                        global_block.get("refAudios") or global_block.get("ref_audios") or []
+                    ),
+                )
+                seg_ref_audios = merge_indexed_refs(common_audios, local_audios)
+            else:
+                seg_ref_audios = local_audios
             if seg_task_key == "r2v":
                 seg_len = max(5, int(end) - int(start))
-                raw_vids = seg_data.get("refVideos") or seg_data.get("ref_videos") or []
+                raw_vids = list(seg_data.get("refVideos") or seg_data.get("ref_videos") or [])
                 # Backward compat: single referenceVideo → slot 0
                 legacy = seg_data.get("referenceVideo") or seg_data.get("reference_video") or {}
                 if isinstance(legacy, dict) and (legacy.get("videoFile") or legacy.get("fileName")):
                     if not any(int(v.get("index", v.get("slot", -1))) == 0 for v in raw_vids if isinstance(v, dict)):
                         raw_vids = [{"index": 0, **legacy}, *list(raw_vids or [])]
-                seg_ref_videos = _load_ref_videos(raw_vids, timeline, seg_len)
+                local_videos = _load_ref_videos(raw_vids, timeline, seg_len)
+                if common_enabled:
+                    common_vids = list(
+                        global_block.get("refVideos") or global_block.get("ref_videos") or []
+                    )
+                    g_legacy = (
+                        global_block.get("referenceVideo")
+                        or global_block.get("reference_video")
+                        or {}
+                    )
+                    if isinstance(g_legacy, dict) and (
+                        g_legacy.get("videoFile") or g_legacy.get("fileName")
+                    ):
+                        if not any(
+                            int(v.get("index", v.get("slot", -1))) == 0
+                            for v in common_vids
+                            if isinstance(v, dict)
+                        ):
+                            common_vids = [{"index": 0, **g_legacy}, *common_vids]
+                    common_videos = (
+                        _load_ref_videos(common_vids, timeline, seg_len) if common_vids else []
+                    )
+                    seg_ref_videos = merge_indexed_refs(common_videos, local_videos)
+                else:
+                    seg_ref_videos = local_videos
         if seg_task_key in ("r2v", "r2i") and not seg_refs and not seg_ref_videos and not seg_ref_audios:
             log.warning(
                 "gen segment #%d task=%s has no reference media — will behave like "
-                "t2v/t2i. Upload 图片/音频/视频 on this material card.",
+                "t2v/t2i. Upload shared「公共参数」and/or per-group 图片/音频/视频.",
                 idx + 1,
                 seg_task_key,
             )
@@ -422,6 +483,12 @@ def build_gen_director_plan(
     raw["timelineMode"] = timeline_mode
     src_w, src_h = _resolve_gen_image_source_dims(segment_ranges, global_block, output_block)
 
+    from .segment_continuity import resolve_continuity_settings
+
+    continuity_enabled, continuity_overlap = resolve_continuity_settings(
+        timeline, segment_count=len(segments)
+    )
+
     return DirectorPlan(
         frame_rate=float(timeline.get("frameRate") or frame_rate or 24),
         total_frames=total,
@@ -441,4 +508,6 @@ def build_gen_director_plan(
         raw=raw,
         export_mode=export_mode,
         run_indices=_parse_run_selection(timeline, len(segments)),
+        continuity_enabled=continuity_enabled,
+        continuity_overlap_frames=continuity_overlap,
     )

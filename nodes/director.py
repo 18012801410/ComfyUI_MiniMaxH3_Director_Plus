@@ -199,21 +199,23 @@ class MiniMaxH3Director:
             r2v_groups=r2v_groups,
         )
 
-        combined, segment_outputs, segment_audios, report = execute_director_plan_core(
-            plan,
-            node_id=unique_id,
-            model=model,
-            vae=video_vae,
-            audio_vae=audio_vae,
-            clip=clip,
-            cfg=cfg,
-            seed=seed,
-            steps=steps,
-            sampler=sampler,
-            scheduler=scheduler,
-            shift_video=shift_video,
-            shift_audio=shift_audio,
-            clear_vram_between_segments=clear_vram_between_segments,
+        combined, segment_outputs, segment_audios, report, export_frame_counts = (
+            execute_director_plan_core(
+                plan,
+                node_id=unique_id,
+                model=model,
+                vae=video_vae,
+                audio_vae=audio_vae,
+                clip=clip,
+                cfg=cfg,
+                seed=seed,
+                steps=steps,
+                sampler=sampler,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                clear_vram_between_segments=clear_vram_between_segments,
+            )
         )
 
         return finalize_director_outputs(
@@ -223,4 +225,5 @@ class MiniMaxH3Director:
             report,
             export_source_images=export_source_images,
             segment_audios=segment_audios,
+            segment_frame_counts=export_frame_counts,
         )

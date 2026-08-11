@@ -20,7 +20,7 @@ from ..lib.audio_io import load_reference_audio
 from ..lib.ref_audios import MAX_REFERENCE_AUDIOS, ref_audios_dict
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS, ref_videos_dict
-from ..lib.image_prep import resolve_output_dimensions
+from ..lib.image_prep import assert_minimax_canvas, resolve_output_dimensions
 from ..lib.task_prompts import get_task_prompt_spec, resolve_task_key
 from ..lib.video_io import (
     load_reference_video_clip,
@@ -37,15 +37,16 @@ from .gen_timeline import (
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 MIN_SEGMENT_FRAMES = 4
-DEFAULT_CONTINUITY_OVERLAP = 9
-MIN_CONTINUITY_OVERLAP = 1
-MAX_CONTINUITY_OVERLAP = 81
+DEFAULT_CONTINUITY_OVERLAP = 22
+MIN_CONTINUITY_OVERLAP = 5
+MAX_CONTINUITY_OVERLAP = 56
 
 
 @dataclass
 class SegmentRef:
     index: int
     tensor: torch.Tensor
+    image_file: str = ""
 
 
 @dataclass
@@ -65,6 +66,29 @@ class SegmentRefVideo:
     tensor: torch.Tensor
     video_file: str = ""
     meta: dict = field(default_factory=dict)
+
+
+def concat_common_segment_prompt(common: str | None, segment: str | None) -> str:
+    """Join shared (common) prompt with per-group prompt.
+
+    Both non-empty → ``common + blank line + segment``.
+    Only one side → that side alone (replaces legacy ``segment or common`` fallback).
+    """
+    common_s = (common or "").strip()
+    segment_s = (segment or "").strip()
+    if common_s and segment_s:
+        return f"{common_s}\n\n{segment_s}"
+    return common_s or segment_s
+
+
+def merge_indexed_refs(common: list, segment: list) -> list:
+    """Merge common + per-group refs by slot index; segment wins on conflict."""
+    by_idx: dict[int, object] = {}
+    for item in common or []:
+        by_idx[int(getattr(item, "index", 0))] = item
+    for item in segment or []:
+        by_idx[int(getattr(item, "index", 0))] = item
+    return sorted(by_idx.values(), key=lambda r: int(getattr(r, "index", 0)))
 
 
 @dataclass
@@ -209,7 +233,10 @@ def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
             continue
         tensor = load_reference_tensor(item)
         if tensor is not None:
-            refs.append(SegmentRef(index=index, tensor=tensor))
+            image_file = str(
+                item.get("imageFile") or item.get("image_file") or item.get("fileName") or ""
+            ).replace("\\", "/").strip()
+            refs.append(SegmentRef(index=index, tensor=tensor, image_file=image_file))
     return sorted(refs, key=lambda r: r.index)
 
 
@@ -571,6 +598,7 @@ def build_director_plan(
         fixed_width=int(output_block.get("width") or timeline.get("width") or width),
         fixed_height=int(output_block.get("height") or timeline.get("height") or height),
     )
+    assert_minimax_canvas(out_w, out_h)
 
     total = int(load_timeline.get("totalFrames") or export_total or total_frames or 0)
     if total <= 0:
@@ -787,15 +815,19 @@ def plan_summary(plan: DirectorPlan) -> str:
     export_label = "分段导出" if plan.export_mode == "segments" else "全部导出"
     lines.append(f"Export mode: {export_label}")
     if plan.continuity_enabled:
-        from .segment_continuity import resolve_continuity_lock_pixels
-
-        lock_px = resolve_continuity_lock_pixels(plan.continuity_overlap_frames)
         lines.append(
-            f"Segment continuity: ON (overlap {plan.continuity_overlap_frames} "
-            f"→ SCAIL lock {lock_px}f + appearance refs)"
+            f"Segment continuity: ON (motion context {plan.continuity_overlap_frames}f "
+            "→ pin previous tail + trim prefix; t2v/i2v/fl2v/r2v/v2v/rv2v)"
+        )
+    elif plan.segment_count >= 2 and plan.global_task_key in {
+        "t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v",
+    }:
+        lines.append(
+            "Segment continuity: OFF — hard cuts between segments "
+            "(enable「段间引导」in Director UI; recommend 22 frames)"
         )
     else:
-        lines.append("Segment continuity: OFF (official Studio / per-segment path)")
+        lines.append("Segment continuity: OFF (per-segment generation)")
     if plan.run_indices is not None:
         selected = sorted(plan.run_indices)
         skipped = [i + 1 for i in range(plan.segment_count) if i not in plan.run_indices]

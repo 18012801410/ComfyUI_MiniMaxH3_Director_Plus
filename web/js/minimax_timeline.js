@@ -46,12 +46,16 @@ import {
     ensureImageBatchTimeline,
     formatMediaDuration,
     getImageBatchUiHeight,
+    listCommonImageRefs,
     mountImageBatchPanel,
+    flushBatchPromptInputs,
     normalizeImageBatchSegments,
+    rebaseR2vGroupSlotsForCommon,
     renderImageBatchGroups,
     setImageBatchPreview,
     setR2vToolbar,
     setToolbarDisabledForBatch,
+    syncBatchPanelFillHeight,
     updateR2vToolbarBtns,
     wireBatchRunSelectControls,
     wireMediaDuration,
@@ -112,10 +116,29 @@ const DIRECTOR_MIN_WIDTH = 900;
 const COMFY_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
 const MINIMAX_CHUNK_SIZE = 8 * 1024 * 1024;
 
-/** Segment continuity is opt-in; default off unless explicitly true in output. */
+/** Segment continuity is opt-in; default off unless explicitly enabled in output. */
 function isContinuityEnabled(output) {
     if (!output) return false;
-    return output.continuityEnabled === true || output.continuity_enabled === true;
+    const raw = output.continuityEnabled ?? output.continuity_enabled;
+    if (raw === true || raw === 1) return true;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        return s === "true" || s === "1" || s === "yes" || s === "on";
+    }
+    return false;
+}
+
+/** Whether段间引导 controls apply for the current task + segment count. */
+function isContinuityEligible(editor) {
+    if (!editor) return false;
+    const taskKey = resolveTaskKey(
+        editor.getTaskKey?.() || editor.taskTypeWidget?.value || editor.globalTask?.value || "",
+    );
+    if (!CONTINUITY_TASKS.has(taskKey)) return false;
+    const segCount = Array.isArray(editor.timeline?.segments) ? editor.timeline.segments.length : 0;
+    const fl2vCount = Array.isArray(editor.timeline?.fl2vGroups) ? editor.timeline.fl2vGroups.length : 0;
+    const r2vCount = Array.isArray(editor.timeline?.r2vGroups) ? editor.timeline.r2vGroups.length : 0;
+    return Math.max(segCount, fl2vCount, r2vCount) >= 2;
 }
 
 function normalizeAudioMode(value) {
@@ -125,12 +148,32 @@ function normalizeAudioMode(value) {
     return "generate";
 }
 
+const CONTINUITY_FRAME_CHOICES = [5, 22, 39, 56];
+/** Official Motion Context baseline recommendation. */
+const DEFAULT_CONTINUITY_FRAMES = 22;
+const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"]);
+
+function snapContinuityFrames(raw) {
+    const n = parseInt(raw, 10);
+    const value = Number.isFinite(n) ? n : DEFAULT_CONTINUITY_FRAMES;
+    let best = DEFAULT_CONTINUITY_FRAMES;
+    let bestDist = Infinity;
+    for (const choice of CONTINUITY_FRAME_CHOICES) {
+        const dist = Math.abs(choice - value);
+        if (dist < bestDist || (dist === bestDist && choice > best)) {
+            best = choice;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
 function normalizeOutputContinuity(output = {}) {
-    const rawOverlap = output.continuityOverlapFrames ?? output.continuity_overlap_frames ?? 9;
+    const rawOverlap = output.continuityOverlapFrames ?? output.continuity_overlap_frames ?? DEFAULT_CONTINUITY_FRAMES;
     return {
         ...output,
         continuityEnabled: isContinuityEnabled(output),
-        continuityOverlapFrames: Math.max(1, Math.min(81, parseInt(rawOverlap, 10) || 9)),
+        continuityOverlapFrames: snapContinuityFrames(rawOverlap),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
     };
 }
@@ -376,10 +419,17 @@ function makeGroupHeaderWidget(inputName, inputData) {
 }
 
 const STYLES = `
-.mmx-host{width:100%;box-sizing:border-box;display:block}
-/* min-height follows content estimate; avoid flex-grow voids when node is oversized. */
-.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px);height:auto}
+.mmx-host{width:100%;box-sizing:border-box;display:flex;flex-direction:column;min-height:var(--comfy-widget-min-height,0px);height:100%}
+/* Default: height follows content. Batch-fill mode stretches to fill a taller node. */
+.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px);height:auto;flex:1 1 auto}
+.bd-wrap.bd-batch-fill{height:100%!important;min-height:0!important;flex:1 1 0}
 .bd-main{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;width:100%}
+/* flex-basis:0 so leftover node height goes into main → batch → list (not empty void). */
+.bd-wrap.bd-batch-fill .bd-main{flex:1 1 0;min-height:0;overflow:hidden}
+.bd-wrap.bd-batch-fill .bd-batch:not(.hidden){flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.bd-wrap.bd-batch-fill .bd-batch-toolbar,.bd-wrap.bd-batch-fill .bd-batch-i2v-notice{flex-shrink:0}
+.bd-wrap.bd-batch-fill .bd-batch-list{flex:1 1 0;min-height:160px;max-height:none!important;overflow-y:auto;height:auto}
+.bd-wrap.bd-batch-fill .bd-run-status{flex-shrink:0;margin-top:0}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
@@ -426,6 +476,27 @@ const STYLES = `
 .bd-canvas.bd-grabbing{cursor:grabbing}
 .bd-output{width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;background:#1e1e1e;border:1px solid #333;border-radius:6px}
 .bd-split{display:block;width:100%;box-sizing:border-box}
+.bd-r2v-common-hint{margin:0 0 8px;font-size:11px;line-height:1.4;color:#9ab;opacity:.95}
+.bd-panel.bd-r2v-common-panel{border:1px solid #3a4a5a;background:linear-gradient(180deg,#1a222c 0%,#151a20 100%)}
+.bd-r2v-common-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}
+.bd-r2v-common-titles{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.bd-r2v-common-titles b{margin:0}
+.bd-r2v-common-status{display:none;font-size:11px;color:#8a9}
+.bd-r2v-common-status.on{color:#8fdfb0}
+.bd-panel.bd-r2v-common-panel .bd-r2v-common-status{display:inline}
+.bd-r2v-common-actions{display:none;align-items:center;gap:8px;flex:0 0 auto}
+.bd-panel.bd-r2v-common-panel .bd-r2v-common-actions{display:flex}
+.bd-btn.bd-r2v-common-toggle,.bd-btn.bd-r2v-common-fold{display:inline-block;flex:0 0 auto;padding:5px 10px;font-size:12px;border-radius:6px;border:1px solid #4a6a8a;background:#243040;color:#d8e6f5;cursor:pointer}
+.bd-btn.bd-r2v-common-fold{border-color:#3a4a5a;background:#1c2430}
+.bd-btn.bd-r2v-common-toggle:hover,.bd-btn.bd-r2v-common-fold:hover{border-color:#6a9aca;background:#2c3c50}
+.bd-btn.bd-r2v-common-toggle.on{border-color:#7a3a3a;background:#301a1a;color:#f0c0c0}
+.bd-btn.bd-r2v-common-toggle.on:hover{border-color:#a05050;background:#3a2020}
+.bd-panel.bd-r2v-common-panel.bd-r2v-common-collapsed{padding-bottom:10px}
+.bd-panel.bd-r2v-common-panel.bd-r2v-common-collapsed .bd-r2v-common-body{display:none!important}
+.bd-panel.bd-r2v-common-panel .bd-r2v-common-body{min-width:0}
+.bd-panel.bd-r2v-common-panel .bd-refs-col{height:auto;min-height:0}
+.bd-panel.bd-r2v-common-panel .bd-rv2v-layout .bd-ref{min-height:72px}
+.bd-panel.bd-r2v-common-panel .bd-rv2v-layout .bd-ref-audio{min-height:44px}
 .bd-player{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%}
 .bd-btn{background:#222;color:#e0e0e0;border:1px solid #111;border-radius:4px;padding:6px 12px;font-size:11px;line-height:1.35;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center}
 .bd-actions>.bd-btn{height:29px;min-height:29px}
@@ -620,36 +691,36 @@ function snapDim(v, stride = 32) {
 /**
  * Match Python ``lib.image_prep.fit_long_edge``:
  * round(dim * scale / stride) * stride — keeps aspect, long side ≤ budget.
- * Stride 16 (backend); stride 32 would bump 848 → 864.
+ * Stride must be 32 for MiniMax H3 (VAE 16× then 2×2 patch). Stride 16 can
+ * yield 496×864 → odd latent width → patchify_video crash under continuity/v2v.
  */
-function snapScaledDim(dim, scale, stride = 16) {
+function snapScaledDim(dim, scale, stride = 32) {
     return Math.max(stride, Math.round((dim * scale) / stride) * stride);
 }
 
 function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}) {
     const mode = String(output?.mode || "long_edge").toLowerCase();
-    const fixedStride = 32;
-    const longStride = 16;
+    const canvasStride = 32;
     if (mode === "fixed") {
-        const w = snapDim(+(output?.width ?? fallback.width ?? 864), fixedStride);
-        const h = snapDim(+(output?.height ?? fallback.height ?? 480), fixedStride);
+        const w = snapDim(+(output?.width ?? fallback.width ?? 864), canvasStride);
+        const h = snapDim(+(output?.height ?? fallback.height ?? 480), canvasStride);
         return { mode: "fixed", width: w, height: h, refMaxSize: Math.max(w, h) };
     }
-    const longEdge = Math.max(longStride, +(output?.longEdge ?? output?.long_edge ?? fallback.refMaxSize ?? 848));
+    const longEdge = Math.max(canvasStride, +(output?.longEdge ?? output?.long_edge ?? fallback.refMaxSize ?? 848));
     const sw = sourceW || 0;
     const sh = sourceH || 0;
     if (!sw || !sh) {
         // Missing source: keep long-edge budget only — do not invent a 16:9 canvas
         // (that would center-crop ultrawide footage later via fit_canvas).
-        return { mode: "long_edge", width: longEdge, height: longStride, refMaxSize: longEdge };
+        return { mode: "long_edge", width: longEdge, height: canvasStride, refMaxSize: longEdge };
     }
     // Always recompute from source (even when already ≤ longEdge) so snapped
     // dims stay aspect-correct; never reuse a stale fixed W×H.
     const scale = Math.min(1, longEdge / Math.max(sw, sh));
     return {
         mode: "long_edge",
-        width: snapScaledDim(sw, scale, longStride),
-        height: snapScaledDim(sh, scale, longStride),
+        width: snapScaledDim(sw, scale, canvasStride),
+        height: snapScaledDim(sh, scale, canvasStride),
         refMaxSize: longEdge,
     };
 }
@@ -982,7 +1053,10 @@ function parseTimeline(raw, totalFrames, fps) {
             frameMap: [],
         },
         videoClips: [],
-        global: { taskType: "", prompt: "", refs: [], refAudios: [], referenceVideo: {}, continuousReference: false },
+        global: {
+            taskType: "", prompt: "", refs: [], refAudios: [], referenceVideo: {},
+            continuousReference: false, commonEnabled: false, commonCollapsed: false,
+        },
         output: {
             // v2v/rv2v default: scale by long edge (preserve aspect). Fixed = center-crop.
             mode: "long_edge",
@@ -992,7 +1066,7 @@ function parseTimeline(raw, totalFrames, fps) {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
-            continuityEnabled: false, continuityOverlapFrames: 9,
+            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         },
         runSelectEnabled: false,
         runSelection: [],
@@ -1012,11 +1086,22 @@ function parseTimeline(raw, totalFrames, fps) {
         data.video.type = data.video.type || "input";
         data.video.subfolder = data.video.subfolder || "";
         data.video.frames = data.video.frames || [];
-        data.global = data.global || { refs: [], refAudios: [], referenceVideo: {}, continuousReference: false };
+        data.global = data.global || {
+            refs: [], refAudios: [], referenceVideo: {},
+            continuousReference: false, commonEnabled: false, commonCollapsed: false,
+        };
         data.global.refs = data.global.refs || [];
         data.global.refAudios = data.global.refAudios || data.global.ref_audios || [];
         data.global.referenceVideo = data.global.referenceVideo || data.global.reference_video || {};
         data.global.continuousReference = !!data.global.continuousReference || !!data.global.continuous_reference;
+        // r2v shared params: default OFF unless explicitly enabled.
+        data.global.commonEnabled = !!(
+            data.global.commonEnabled ?? data.global.common_enabled
+        );
+        // UI fold only — does not affect runtime merge when commonEnabled is true.
+        data.global.commonCollapsed = !!(
+            data.global.commonCollapsed ?? data.global.common_collapsed
+        );
         const legacyRef = data.referenceVideo || data.reference_video;
         if (legacyRef && (legacyRef.videoFile || legacyRef.fileName)
             && !(data.global.referenceVideo.videoFile || data.global.referenceVideo.fileName)) {
@@ -1264,9 +1349,36 @@ class MiniMaxH3DirectorEditor {
         el.textContent = `${base}${count} ${t("external.durationHint")}`;
     }
 
+    /**
+     * Push a Director-card prompt edit into the matching external Group node
+     * widget so execution (and the next sync) don't revive stale graph text.
+     */
+    writeExternalGroupPrompt(segIndex, prompt) {
+        if (!this.hasExternalI2vGroups?.() && !this.hasExternalR2vGroups?.()) return;
+        const nodes = collectExternalGroupNodes(this);
+        const node = nodes?.[segIndex];
+        if (!node) return;
+        const w = (node.widgets || []).find((x) => x?.name === "prompt");
+        if (!w) return;
+        const next = String(prompt ?? "");
+        if (String(w.value ?? "") === next) return;
+        // Avoid feedback loop: our widget callback triggers syncExternalGroupsTimeline.
+        w._mmxSkipExternalSync = true;
+        try {
+            w.value = next;
+            // ComfyUI V3 / custom widgets may need callback for persistence.
+            w.callback?.(next);
+        } finally {
+            queueMicrotask(() => { w._mmxSkipExternalSync = false; });
+        }
+    }
+
     /** Mirror graph-wired Group count/duration into the Director timeline UI. */
     syncExternalGroupsTimeline() {
         this.updateExternalGroupsBanner();
+        // Keep any in-progress Director textarea edits before rebuilding from graph.
+        if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         const specs = collectExternalGroupSpecs(this);
         if (!specs?.length) {
             this._externalGroupsSyncSig = null;
@@ -1276,6 +1388,7 @@ class MiniMaxH3DirectorEditor {
         const mode = this.getDirectorMode?.() || this._directorMode;
         const taskKey = resolveTaskKey(this.getTaskKey?.() || this.taskTypeWidget?.value);
         const sig = JSON.stringify(specs.map((s) => [
+            s.nodeId ?? "",
             Number(s.durationSec) || 0,
             s.prompt || "",
             s.firstImageFile || "",
@@ -1296,15 +1409,29 @@ class MiniMaxH3DirectorEditor {
 
         if (mode === "fl2v") {
             const prev = this.timeline.shots || [];
-            this.timeline.shots = specs.map((spec, i) => newFl2vShot({
-                ...(prev[i] || {}),
-                id: prev[i]?.id,
-                durationSec: spec.durationSec ?? defaultDurationSec("fl2v"),
-                prompt: (spec.prompt || prev[i]?.prompt || "").trim(),
-                // External graph is source of truth for media previews.
-                startImage: imageRefFromPath(spec.firstImageFile),
-                endImage: imageRefFromPath(spec.lastImageFile),
-            }));
+            const prevByNode = new Map(
+                prev.filter((s) => s?.externalNodeId != null)
+                    .map((s) => [String(s.externalNodeId), s]),
+            );
+            const allowIndexFallback = !prev.some((s) => s?.externalNodeId != null);
+            this.timeline.shots = specs.map((spec, i) => {
+                const matched = (spec.nodeId != null && prevByNode.get(String(spec.nodeId)))
+                    || (allowIndexFallback ? (prev[i] || null) : null);
+                // Same Group node → keep Director draft if widget briefly empty.
+                // Different/new node at this index → never inherit another shot's prompt.
+                const specPrompt = String(spec.prompt ?? "").trim();
+                const prompt = specPrompt
+                    || (matched ? String(matched.prompt || "").trim() : "");
+                return newFl2vShot({
+                    id: matched?.id,
+                    durationSec: spec.durationSec ?? defaultDurationSec("fl2v"),
+                    prompt,
+                    externalNodeId: spec.nodeId ?? null,
+                    // External graph is source of truth for media previews.
+                    startImage: imageRefFromPath(spec.firstImageFile),
+                    endImage: imageRefFromPath(spec.lastImageFile),
+                });
+            });
             syncFl2vFromShots(this);
             this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.shots.length - 1));
             updateFl2vDetailUI?.(this);
@@ -1318,11 +1445,27 @@ class MiniMaxH3DirectorEditor {
 
         if (mode === "prompt_batch" || mode === "image_batch" || isPromptBatchTask(taskKey)) {
             const prev = this.timeline.segments || [];
+            const prevByNode = new Map(
+                prev.filter((s) => s?.externalNodeId != null)
+                    .map((s) => [String(s.externalNodeId), s]),
+            );
+            // First wire / pre-nodeId eras: allow index align once. After segments are
+            // tagged, never inherit prompt from a different Group at the same index.
+            const allowIndexFallback = !prev.some((s) => s?.externalNodeId != null);
             const isR2v = taskKey === "r2v" || this.hasExternalR2vGroups?.();
+            const promptWriteBack = [];
+            const activePromptIndex = (() => {
+                const el = typeof document !== "undefined" ? document.activeElement : null;
+                if (!el?.getAttribute) return -1;
+                const n = parseInt(el.getAttribute("data-batch-prompt-index"), 10);
+                return Number.isFinite(n) ? n : -1;
+            })();
             this.timeline.segments = specs.map((spec, i) => {
+                const matched = (spec.nodeId != null && prevByNode.get(String(spec.nodeId)))
+                    || (allowIndexFallback ? (prev[i] || null) : null);
                 const firstRef = imageRefFromPath(spec.firstImageFile);
                 const genImage = firstRef
-                    || (isR2v ? (prev[i]?.genImage || { imageFile: "" }) : { imageFile: "" });
+                    || (isR2v ? (matched?.genImage || { imageFile: "" }) : { imageFile: "" });
                 // External graph is source of truth for r2v media (do not keep stale UI uploads).
                 const refs = isR2v
                     ? (spec.refImages || []).map((r) => ({
@@ -1330,7 +1473,7 @@ class MiniMaxH3DirectorEditor {
                         imageFile: r.imageFile || "",
                         imageB64: "",
                     }))
-                    : (prev[i]?.refs || []);
+                    : (matched?.refs || []);
                 const refVideos = isR2v
                     ? (spec.refVideos || []).map((r) => ({
                         index: r.index,
@@ -1343,7 +1486,7 @@ class MiniMaxH3DirectorEditor {
                         previewImageUrl: r.previewImageUrl || "",
                         linked: !!r.linked || !!(r.videoFile || r.previewImageFile || r.previewImageUrl),
                     }))
-                    : (prev[i]?.refVideos || []);
+                    : (matched?.refVideos || []);
                 const refAudios = isR2v
                     ? (spec.refAudios || []).map((r) => ({
                         index: r.index,
@@ -1352,20 +1495,42 @@ class MiniMaxH3DirectorEditor {
                         type: r.type || "input",
                         subfolder: r.subfolder || "",
                     }))
-                    : (prev[i]?.refAudios || []);
+                    : (matched?.refAudios || []);
+                const specPrompt = String(spec.prompt ?? "").trim();
+                const draftPrompt = matched ? String(matched.prompt || "").trim() : "";
+                // Priority: focused Director textarea > Group widget > same-node draft.
+                // Prevents a just-pasted Group-3 prompt from being replaced by stale
+                // widget text from a previous short film during an incidental sync.
+                let prompt = specPrompt;
+                if (activePromptIndex === i && draftPrompt) {
+                    prompt = draftPrompt;
+                } else if (!specPrompt) {
+                    prompt = draftPrompt;
+                }
+                if (prompt && prompt !== specPrompt) {
+                    promptWriteBack.push({ index: i, prompt });
+                }
                 return newBatchSegment({
-                    ...(prev[i] || {}),
-                    id: prev[i]?.id,
+                    ...(matched?.id ? { id: matched.id } : {}),
                     durationSec: spec.durationSec ?? defaultDurationSec(taskKey),
-                    prompt: (spec.prompt || prev[i]?.prompt || "").trim(),
-                    negativePrompt: prev[i]?.negativePrompt ?? "",
+                    prompt,
+                    negativePrompt: matched?.negativePrompt ?? "",
+                    externalNodeId: spec.nodeId ?? null,
                     refs,
                     refAudios,
                     refVideos,
                     genImage: genImage?.imageFile ? genImage : { imageFile: "" },
                     imageFile: genImage?.imageFile || "",
+                    // Preserve preview frames for the same Group node across syncs.
+                    previewB64: matched?.previewB64 || "",
+                    previewFrames: matched?.previewFrames || [],
+                    previewFps: matched?.previewFps,
+                    ...(matched?.runEnabled != null ? { runEnabled: matched.runEnabled } : {}),
                 });
             });
+            for (const item of promptWriteBack) {
+                this.writeExternalGroupPrompt(item.index, item.prompt);
+            }
             normalizeImageBatchSegments(this);
             this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.segments.length - 1));
             this.renderImageBatchGroups?.();
@@ -1460,26 +1625,35 @@ class MiniMaxH3DirectorEditor {
         this._resetLayoutStyles();
     }
 
+    getDirectorUiMinHeight() {
+        return getDirectorUiHeight(this);
+    }
+
     updateDomWidgetHeight() {
         const h = getDirectorUiHeight(this);
-        this.container?.style.setProperty("--comfy-widget-min-height", String(h));
+        this.container?.style.setProperty("--comfy-widget-min-height", `${h}px`);
         if (this.container) this.container.style.minHeight = `${h}px`;
         if (this.domWidget) {
-            this.domWidget.computeSize = (width) => [width, h];
+            // Prefer user-stretched height when the node is taller than content min.
+            this.domWidget.computeSize = (width) => {
+                const stretch = this._domWidgetStretchH || 0;
+                return [width, Math.max(h, stretch)];
+            };
             if (this.domWidget.options) {
                 this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
             }
         }
-        // Keep LiteGraph node height in sync. Batch list is scroll-capped, so without
-        // this the node stays tall after height estimates shrink → huge empty region.
+        // Grow node when content needs more room; do NOT shrink a user-enlarged node
+        // (batch list fills the extra height via syncBatchPanelFillHeight).
         if (this.node?.computeSize && !this.isPlaying) {
             const sz = this.node.computeSize();
             const curH = this.node.size?.[1] || 0;
-            if (sz?.[1] != null && Math.abs(curH - sz[1]) > 2) {
+            if (sz?.[1] != null && curH < sz[1] - 2) {
                 this.node.setSize([this.node.size[0], sz[1]]);
                 this.node.setDirtyCanvas?.(true, true);
             }
         }
+        syncBatchPanelFillHeight(this);
     }
 
     scheduleRender() {
@@ -1496,10 +1670,10 @@ class MiniMaxH3DirectorEditor {
         if (this.isFl2vMode()) {
             const fl = buildFl2vPayloadFields(this);
             const outMode = this.timeline.output?.mode || "long_edge";
-            const output = {
+            const output = normalizeOutputContinuity({
                 ...(this.timeline.output || {}),
                 mode: outMode,
-            };
+            });
             const body = { ...this.timeline };
             stripTimelineContinuityRootFields(body);
             stripTimelineEphemeralFields(body);
@@ -1666,6 +1840,8 @@ class MiniMaxH3DirectorEditor {
     flushTimelineSync() {
         clearTimeout(this._syncTimer);
         this._syncTimer = null;
+        // Refresh visibility first so queue flush can pull checkbox state reliably.
+        this.updateSegmentContinuityUI();
         this._writeTimelineWidget();
     }
 
@@ -1676,6 +1852,10 @@ class MiniMaxH3DirectorEditor {
 
     _writeTimelineWidget() {
         if (!this.timelineWidget) return;
+        // Batch prompt textareas can lag behind segment objects after duration
+        // normalize — always harvest DOM drafts before serializing timeline_data.
+        if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         this.syncFromWidgets();
         this.timelineWidget.value = JSON.stringify(this.buildTimelinePayload());
         this.node.setDirtyCanvas(true, false);
@@ -1840,8 +2020,13 @@ class MiniMaxH3DirectorEditor {
             </span>
             <span class="bd-continuous-ref hidden" data-r="segment-continuity-wrap" hidden aria-hidden="true" title="">
                 <label><input type="checkbox" data-r="segment-continuity-cb"><span data-i18n="output.segmentContinuity">段间引导</span></label>
-                <span class="bd-meta" data-i18n="output.continuityOverlap">参考帧数</span>
-                <input type="number" class="bd-num" data-r="segment-continuity-overlap" min="1" max="81" step="4" value="9" style="width:48px">
+                <span class="bd-meta" data-i18n="output.continuityOverlap">上下文帧数</span>
+                <select class="bd-num" data-r="segment-continuity-overlap" style="width:64px">
+                    <option value="5">5</option>
+                    <option value="22" selected>22</option>
+                    <option value="39">39</option>
+                    <option value="56">56</option>
+                </select>
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview active" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
@@ -1872,43 +2057,55 @@ class MiniMaxH3DirectorEditor {
         bottom.className = "bd-split";
         bottom.innerHTML = `
             <div class="bd-panel" data-r="global-panel">
-                <b data-r="global-panel-title" data-i18n="panel.globalPromptAndRefs">全局提示词 & 参考图 (图片1–9)</b>
-                <div class="bd-prompt-layout" data-r="global-prompt-layout">
-                    <div class="bd-refs-col" data-r="global-refs-col">
-                        <div class="bd-refs-images-wrap" data-r="global-refs-images-wrap">
-                            <div class="bd-r2v-section-head" data-r="global-refs-head">
-                                <span class="bd-label bd-r2v-section-title" data-r="global-refs-label" data-i18n="panel.refImages">参考图 (图片1–9)</span>
-                                <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
-                            </div>
-                            <div class="bd-refs" data-r="global-refs"></div>
-                        </div>
-                        <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
-                            <div class="bd-r2v-section-head" data-r="global-audios-head">
-                                <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
-                                <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
-                            </div>
-                            <div class="bd-ref-audios" data-r="global-ref-audios"></div>
-                        </div>
-                        <div class="bd-ref-video-col hidden" data-r="global-ref-video-col">
-                            <span class="bd-label" data-i18n="panel.refVideo">参考视频（植入内容）</span>
-                            <div class="bd-gen-src" data-r="global-ref-video" data-i18n="panel.uploadRefVideo" data-i18n-title="tooltip.uploadRefVideo">点击上传参考视频</div>
-                            <span class="bd-meta bd-ref-video-name" data-r="global-ref-video-name"></span>
-                            <label class="bd-continuous-ref hidden" data-r="continuous-ref-wrap" data-i18n-title="tooltip.continuousRef">
-                                <input type="checkbox" data-r="continuous-ref-cb">
-                                <span data-i18n="panel.continuousRef">连续参考</span>
-                            </label>
-                        </div>
-                        <div class="bd-gen-src hidden" data-r="gen-global-img" data-i18n="panel.uploadSourceImage" data-i18n-title="tooltip.uploadSourceImage">点击上传源图片</div>
+                <div class="bd-r2v-common-head" data-r="r2v-common-head">
+                    <div class="bd-r2v-common-titles">
+                        <b data-r="global-panel-title" data-i18n="panel.globalPromptAndRefs">全局提示词 & 参考图 (图片1–9)</b>
+                        <span class="bd-r2v-common-status" data-r="r2v-common-status" data-i18n="panel.r2vCommonOff">未启用 · 各组独立素材与提示词</span>
                     </div>
-                    <div class="bd-prompt-col">
-                        <span class="bd-label" data-i18n="panel.prompt">提示词</span>
-                        <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
-                        <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
+                    <div class="bd-r2v-common-actions">
+                        <button type="button" class="bd-btn bd-r2v-common-fold hidden" data-r="r2v-common-fold" data-i18n="panel.r2vCommonCollapse">收起公共参数</button>
+                        <button type="button" class="bd-btn bd-r2v-common-toggle" data-r="r2v-common-toggle" data-i18n="panel.r2vCommonEnable">启用公共参数</button>
                     </div>
                 </div>
-                <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
-                    <span class="bd-label" data-i18n="panel.defaultSegmentFrames">默认片段帧数</span>
-                    <input type="number" class="bd-num" data-r="gen-default-fc" min="1" max="${MAX_GEN_FRAMES}" value="124" style="width:72px">
+                <div class="bd-r2v-common-body" data-r="r2v-common-body">
+                    <div class="bd-meta bd-r2v-common-hint hidden" data-r="r2v-common-hint" data-i18n="panel.r2vCommonHint">公共参考图/音频供各组读取；公共提示词会与每组提示词拼接成完整提示词。同槽位以组内素材优先。</div>
+                    <div class="bd-prompt-layout" data-r="global-prompt-layout">
+                        <div class="bd-refs-col" data-r="global-refs-col">
+                            <div class="bd-refs-images-wrap" data-r="global-refs-images-wrap">
+                                <div class="bd-r2v-section-head" data-r="global-refs-head">
+                                    <span class="bd-label bd-r2v-section-title" data-r="global-refs-label" data-i18n="panel.refImages">参考图 (图片1–9)</span>
+                                    <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
+                                </div>
+                                <div class="bd-refs" data-r="global-refs"></div>
+                            </div>
+                            <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
+                                <div class="bd-r2v-section-head" data-r="global-audios-head">
+                                    <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
+                                    <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
+                                </div>
+                                <div class="bd-ref-audios" data-r="global-ref-audios"></div>
+                            </div>
+                            <div class="bd-ref-video-col hidden" data-r="global-ref-video-col">
+                                <span class="bd-label" data-i18n="panel.refVideo">参考视频（植入内容）</span>
+                                <div class="bd-gen-src" data-r="global-ref-video" data-i18n="panel.uploadRefVideo" data-i18n-title="tooltip.uploadRefVideo">点击上传参考视频</div>
+                                <span class="bd-meta bd-ref-video-name" data-r="global-ref-video-name"></span>
+                                <label class="bd-continuous-ref hidden" data-r="continuous-ref-wrap" data-i18n-title="tooltip.continuousRef">
+                                    <input type="checkbox" data-r="continuous-ref-cb">
+                                    <span data-i18n="panel.continuousRef">连续参考</span>
+                                </label>
+                            </div>
+                            <div class="bd-gen-src hidden" data-r="gen-global-img" data-i18n="panel.uploadSourceImage" data-i18n-title="tooltip.uploadSourceImage">点击上传源图片</div>
+                        </div>
+                        <div class="bd-prompt-col">
+                            <span class="bd-label" data-i18n="panel.prompt">提示词</span>
+                            <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
+                            <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
+                        </div>
+                    </div>
+                    <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
+                        <span class="bd-label" data-i18n="panel.defaultSegmentFrames">默认片段帧数</span>
+                        <input type="number" class="bd-num" data-r="gen-default-fc" min="1" max="${MAX_GEN_FRAMES}" value="124" style="width:72px">
+                    </div>
                 </div>
             </div>
             <div class="bd-panel" data-r="segment-panel" style="display:none">
@@ -2016,7 +2213,14 @@ class MiniMaxH3DirectorEditor {
         }
         this.globalTask = this.root.querySelector('[data-r="global-task"]');
         this.globalPanel = this.root.querySelector('[data-r="global-panel"]');
-        this.globalPanelTitle = this.globalPanel?.querySelector("b");
+        this.globalPanelTitle = this.globalPanel?.querySelector('[data-r="global-panel-title"]')
+            || this.globalPanel?.querySelector("b");
+        this.r2vCommonHead = this.root.querySelector('[data-r="r2v-common-head"]');
+        this.r2vCommonBody = this.root.querySelector('[data-r="r2v-common-body"]');
+        this.r2vCommonHint = this.root.querySelector('[data-r="r2v-common-hint"]');
+        this.r2vCommonStatus = this.root.querySelector('[data-r="r2v-common-status"]');
+        this.r2vCommonFold = this.root.querySelector('[data-r="r2v-common-fold"]');
+        this.r2vCommonToggle = this.root.querySelector('[data-r="r2v-common-toggle"]');
         this.segmentPanel = this.root.querySelector('[data-r="segment-panel"]');
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
@@ -2189,6 +2393,44 @@ class MiniMaxH3DirectorEditor {
         }
         this.globalTask.onchange = () => this.onGlobalField("taskType", this.globalTask.value);
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
+        if (this.r2vCommonFold) {
+            this.r2vCommonFold.onclick = (e) => {
+                stopDomEvent(e);
+                if (!this.usesR2vCommonPanel() || !this.isR2vCommonEnabled()) return;
+                this.timeline.global = this.timeline.global || {
+                    refs: [], refAudios: [], prompt: "",
+                    commonEnabled: true, commonCollapsed: false,
+                };
+                this.timeline.global.commonCollapsed = !this.isR2vCommonCollapsed();
+                this.syncR2vCommonCollapse();
+                this.scheduleTimelineSync();
+                this.updateDomWidgetHeight?.();
+            };
+        }
+        if (this.r2vCommonToggle) {
+            this.r2vCommonToggle.onclick = (e) => {
+                stopDomEvent(e);
+                if (!this.usesR2vCommonPanel()) return;
+                this.timeline.global = this.timeline.global || {
+                    refs: [], refAudios: [], prompt: "",
+                    commonEnabled: false, commonCollapsed: false,
+                };
+                this.timeline.global.refs = this.timeline.global.refs || [];
+                this.timeline.global.refAudios = this.timeline.global.refAudios || [];
+                const nextOn = !this.isR2vCommonEnabled();
+                this.timeline.global.commonEnabled = nextOn;
+                // Enable → expand; disable → collapse and stop runtime merge.
+                this.timeline.global.commonCollapsed = !nextOn;
+                if (nextOn) {
+                    rebaseR2vGroupSlotsForCommon(this);
+                }
+                // Must refresh visibility + render ref/audio slots (they stay empty until first paint).
+                this.updateModeUI();
+                this.renderImageBatchGroups?.();
+                this.scheduleTimelineSync();
+                this.updateDomWidgetHeight?.();
+            };
+        }
         if (this.continuousRefCb) {
             this.continuousRefCb.onchange = () => {
                 this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
@@ -2894,7 +3136,8 @@ class MiniMaxH3DirectorEditor {
     /** rv2v (and video-timeline tasks with refs) use the polished r2v-like asset stage. */
     usesRv2vRefStyle(taskKey = this.getTaskKey()) {
         const key = resolveTaskKey(taskKey);
-        return key === "rv2v" || key === "vrc2v" || key === "vi2v";
+        // r2v shared panel reuses the polished image/audio slot chrome.
+        return key === "rv2v" || key === "vrc2v" || key === "vi2v" || key === "r2v";
     }
 
     /** v2v prompt-only video edit — full-width polished prompt stage. */
@@ -2958,8 +3201,11 @@ class MiniMaxH3DirectorEditor {
         this.globalRefVideoCol?.classList.toggle("hidden", !showGlobalRefVideo);
         if (this.globalPanelTitle) {
             let titleKey = "panel.globalPromptOnly";
-            if (showGlobalRefVideo) titleKey = "panel.globalPromptAndRefVideo";
-            else if (showGlobalRefs || showGlobalRefAudios) {
+            if (this.usesR2vCommonPanel()) {
+                titleKey = "panel.r2vCommonParams";
+            } else if (showGlobalRefVideo) {
+                titleKey = "panel.globalPromptAndRefVideo";
+            } else if (showGlobalRefs || showGlobalRefAudios) {
                 titleKey = showGlobalRefAudios
                     ? "panel.globalPromptAndRefsMedia"
                     : "panel.globalPromptAndRefs";
@@ -2967,6 +3213,7 @@ class MiniMaxH3DirectorEditor {
             this.globalPanelTitle.textContent = t(titleKey);
             this.globalPanelTitle.setAttribute("data-i18n", titleKey);
         }
+        this.syncR2vCommonCollapse();
 
         const segKey = resolveTaskKey(
             seg?.taskType || this.timeline.global?.taskType || this.globalTask?.value || globalKey,
@@ -3159,8 +3406,10 @@ class MiniMaxH3DirectorEditor {
         this.updateStageVisibility();
         this.updateLiveSamplePanel();
         this.syncExternalGroupsTimeline();
-        this.root.querySelector(".bd-split")?.classList.toggle("hidden", isBatch || isFl2v);
+        // r2v keeps bd-split visible so the shared「公共参数」panel can sit above batch cards.
+        this.root.querySelector(".bd-split")?.classList.toggle("hidden", (isBatch && !isR2v) || isFl2v);
         this.batchPanel?.classList.toggle("hidden", !isBatch);
+        this.root?.classList.toggle("bd-batch-fill", !!isBatch);
         this.fl2vUi?.root?.classList.toggle("hidden", !isFl2v);
         this.fl2vTotalWrap?.classList.toggle("hidden", !isFl2v);
         if (isFl2v) {
@@ -3196,8 +3445,12 @@ class MiniMaxH3DirectorEditor {
             updateR2vToolbarBtns(this);
         }
 
-        // Side ref panels stay hidden for all batch modes (refs live in cards).
-        this.updateReferenceImageVisibility({ hideTimeline: isBatch || isGen });
+        // Side ref panels stay hidden for most batch modes (refs live in cards).
+        // r2v shows a collapsible「公共参数」bar; refs only when enabled/expanded.
+        this.syncR2vCommonCollapse();
+        this.updateReferenceImageVisibility({
+            hideTimeline: (isBatch && !this.isR2vCommonEnabled()) || isGen,
+        });
 
         const showGenImg = mode === "gen_image";
         this.genGlobalImg?.classList.toggle("hidden", !showGenImg || !this.isGlobalMode());
@@ -4090,6 +4343,74 @@ class MiniMaxH3DirectorEditor {
 
     isGlobalMode() { return (this.timeline.editMode || "global") === "global"; }
 
+    /** r2v batch: show timeline.global as shared params for all asset groups. */
+    usesR2vCommonPanel() {
+        return !!this.isR2vBatch?.();
+    }
+
+    /** Whether shared common params are enabled at run time. Default off. */
+    isR2vCommonEnabled() {
+        if (!this.usesR2vCommonPanel()) return false;
+        return !!(this.timeline?.global?.commonEnabled ?? this.timeline?.global?.common_enabled);
+    }
+
+    /** UI-only fold; when enabled+collapsed, runtime still merges common params. */
+    isR2vCommonCollapsed() {
+        if (!this.isR2vCommonEnabled()) return true;
+        return !!(this.timeline?.global?.commonCollapsed ?? this.timeline?.global?.common_collapsed);
+    }
+
+    /** Global / shared-ref panel owns timeline.global refs + prompt when enabled. */
+    usesGlobalRefPanel() {
+        return this.isGlobalMode() || this.isR2vCommonEnabled();
+    }
+
+    syncR2vCommonCollapse() {
+        const r2v = this.usesR2vCommonPanel();
+        const on = this.isR2vCommonEnabled();
+        const folded = this.isR2vCommonCollapsed();
+        const bodyHidden = !on || folded;
+        this.globalPanel?.classList.toggle("bd-r2v-common-panel", r2v);
+        this.globalPanel?.classList.toggle("bd-r2v-common-collapsed", r2v && bodyHidden);
+        this.r2vCommonHint?.classList.toggle("hidden", !r2v || bodyHidden);
+        if (this.r2vCommonFold) {
+            this.r2vCommonFold.classList.toggle("hidden", !r2v || !on);
+            if (r2v && on) {
+                const fkey = folded ? "panel.r2vCommonExpand" : "panel.r2vCommonCollapse";
+                this.r2vCommonFold.textContent = t(fkey);
+                this.r2vCommonFold.setAttribute("data-i18n", fkey);
+                this.r2vCommonFold.title = t(
+                    folded ? "tooltip.r2vCommonExpand" : "tooltip.r2vCommonCollapse",
+                );
+            }
+        }
+        if (this.r2vCommonToggle) {
+            this.r2vCommonToggle.classList.toggle("on", on);
+            const key = on ? "panel.r2vCommonDisable" : "panel.r2vCommonEnable";
+            this.r2vCommonToggle.textContent = t(key);
+            this.r2vCommonToggle.setAttribute("data-i18n", key);
+            this.r2vCommonToggle.title = t(on ? "tooltip.r2vCommonDisable" : "tooltip.r2vCommonEnable");
+        }
+        if (this.r2vCommonStatus) {
+            this.r2vCommonStatus.classList.toggle("on", on);
+            const skey = !on
+                ? "panel.r2vCommonOff"
+                : (folded ? "panel.r2vCommonOnCollapsed" : "panel.r2vCommonOn");
+            this.r2vCommonStatus.textContent = t(skey);
+            this.r2vCommonStatus.setAttribute("data-i18n", skey);
+        }
+        if (r2v && this.globalPrompt) {
+            this.globalPrompt.placeholder = t("placeholder.r2vCommonPrompt");
+            this.globalPrompt.setAttribute("data-i18n-placeholder", "placeholder.r2vCommonPrompt");
+        }
+        // Keep shared layout class in sync so image/audio slot chrome paints correctly.
+        // Layout chrome follows enablement (not UI fold) so group inherit previews stay correct.
+        if (r2v) {
+            this.globalPromptLayout?.classList.toggle("bd-rv2v-layout", on);
+            this.globalPanel?.classList.toggle("bd-rv2v-panel", on);
+        }
+    }
+
     setEditMode(mode) {
         this.timeline.editMode = mode;
         this.root.querySelector('[data-a="mode-global"]').classList.toggle("active", mode === "global");
@@ -4100,19 +4421,26 @@ class MiniMaxH3DirectorEditor {
 
     updateModeUI() {
         const global = this.isGlobalMode();
-        this.globalPanel.style.display = global ? "flex" : "none";
-        this.segmentPanel.style.display = global ? "none" : "flex";
+        const r2vCommon = this.usesR2vCommonPanel();
+        const r2vOn = this.isR2vCommonEnabled();
+        this.globalPanel.style.display = (global || r2vCommon) ? "flex" : "none";
+        this.segmentPanel.style.display = (global || r2vCommon) ? "none" : "flex";
+        this.syncR2vCommonCollapse();
         this.updateReferenceImageVisibility({
-            hideTimeline: this.isImageBatch() || this.isGenMode(),
-            seg: global ? null : this.timeline.segments[this.selectedIndex],
+            // Show shared ref chrome only when r2v common is enabled (expanded).
+            hideTimeline: (this.isImageBatch() && !r2vOn) || this.isGenMode(),
+            seg: (global || r2vOn) ? null : this.timeline.segments[this.selectedIndex],
         });
-        if (!global) this.updateSelectionUI();
-        else if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
+        if (!global && !r2vCommon) this.updateSelectionUI();
+        else {
+            this.updateSelectionUI();
+            if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
+        }
         this.updateLiveSamplePanel();
     }
 
     getRefTarget() {
-        if (this.isGlobalMode()) return this.timeline.global;
+        if (this.usesGlobalRefPanel()) return this.timeline.global;
         const seg = this.timeline.segments[this.selectedIndex];
         return seg || this.timeline.global;
     }
@@ -4166,13 +4494,16 @@ class MiniMaxH3DirectorEditor {
         updateFl2vToolbarBtns?.(this);
         updateR2vToolbarBtns?.(this);
         this.renderImageBatchGroups?.();
+        const r2vOn = this.isR2vCommonEnabled?.();
+        this.syncR2vCommonCollapse?.();
         this.syncRv2vRefLayoutClasses?.({
-            hideTimeline: this.isImageBatch?.() || this.isGenMode?.(),
-            seg: this.isGlobalMode?.() ? null : this.timeline?.segments?.[this.selectedIndex],
+            hideTimeline: (this.isImageBatch?.() && !r2vOn) || this.isGenMode?.(),
+            seg: this.usesGlobalRefPanel?.() ? null : this.timeline?.segments?.[this.selectedIndex],
         });
-        if (this.isGlobalMode?.() && taskUsesReferenceImages(this.getTaskKey())) {
+        if (this.usesGlobalRefPanel?.() && taskUsesReferenceImages(this.getTaskKey())) {
+            if (this.timeline?.global) this.timeline.global.refs = this.timeline.global.refs || [];
             this.renderRefSlots?.(this.timeline.global?.refs, this.globalRefsBox, true);
-        } else if (!this.isGlobalMode?.()) {
+        } else if (!this.usesGlobalRefPanel?.()) {
             const seg = this.timeline?.segments?.[this.selectedIndex];
             if (seg && taskUsesReferenceImages(resolveTaskKey(seg.taskType || this.getTaskKey()))) {
                 this.renderRefSlots?.(seg.refs, this.segRefsBox, false);
@@ -4236,7 +4567,7 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
-            continuityEnabled: false, continuityOverlapFrames: 9,
+            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -4282,7 +4613,9 @@ class MiniMaxH3DirectorEditor {
         }
         if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
         if (this.segmentContinuityOverlap) {
-            this.segmentContinuityOverlap.value = String(out.continuityOverlapFrames ?? 9);
+            this.segmentContinuityOverlap.value = String(
+                snapContinuityFrames(out.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES),
+            );
         }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
@@ -4291,13 +4624,28 @@ class MiniMaxH3DirectorEditor {
     }
 
     updateSegmentContinuityUI() {
-        // MiniMax H3 Director: segment continuity / SCAIL UI removed.
+        const show = isContinuityEligible(this);
         if (this.segmentContinuityWrap) {
-            this.segmentContinuityWrap.classList.add("hidden");
-            this.segmentContinuityWrap.hidden = true;
+            this.segmentContinuityWrap.classList.toggle("hidden", !show);
+            this.segmentContinuityWrap.hidden = !show;
+            this.segmentContinuityWrap.setAttribute("aria-hidden", show ? "false" : "true");
+            this.segmentContinuityWrap.title = show
+                ? t("tooltip.segmentContinuity")
+                : "";
         }
-        if (this.timeline?.output) {
-            this.timeline.output.continuityEnabled = false;
+        if (!show && this.timeline?.output) {
+            // Hide only — keep saved preference so it returns when multi-segment again.
+        }
+        if (this.segmentContinuityOverlap && this.timeline?.output) {
+            const frames = snapContinuityFrames(
+                this.timeline.output.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
+            );
+            this.segmentContinuityOverlap.value = String(frames);
+            this.timeline.output.continuityOverlapFrames = frames;
+        }
+        if (this.segmentContinuityCb && this.timeline?.output) {
+            // Keep DOM aligned with timeline; eligibility only gates visibility.
+            this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
     }
 
@@ -4483,7 +4831,7 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
-            continuityEnabled: false, continuityOverlapFrames: 9,
+            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -4535,10 +4883,7 @@ class MiniMaxH3DirectorEditor {
         } else if (key === "continuityEnabled") {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
-            const n = parseInt(value, 10);
-            this.timeline.output.continuityOverlapFrames = Number.isFinite(n)
-                ? Math.max(1, Math.min(81, n))
-                : 9;
+            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(value);
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -4611,8 +4956,9 @@ class MiniMaxH3DirectorEditor {
             exportMode: prevOut.exportMode ?? "all",
             audioMode: normalizeAudioMode(prevOut.audioMode),
             continuityEnabled: isContinuityEnabled(prevOut),
-            continuityOverlapFrames: Math.max(1, Math.min(81,
-                parseInt(prevOut.continuityOverlapFrames ?? 9, 10) || 9)),
+            continuityOverlapFrames: snapContinuityFrames(
+                prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
+            ),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -4640,19 +4986,30 @@ class MiniMaxH3DirectorEditor {
             mode: "long_edge", longEdge: 864, width: 864, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
-            continuityEnabled: false, continuityOverlapFrames: 9,
+            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
         }
-        if (this.segmentContinuityCb) {
+        // Sync from DOM when task+segments are eligible — do not rely on CSS
+        // "hidden" class (can lag behind equal-split / task changes at queue time).
+        const continuityEligible = isContinuityEligible(this);
+        if (continuityEligible && this.segmentContinuityCb) {
             this.timeline.output.continuityEnabled = !!this.segmentContinuityCb.checked;
+        } else {
+            // Normalize stored flag without clearing preference while ineligible.
+            this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
         }
-        if (this.segmentContinuityOverlap) {
-            const n = parseInt(this.segmentContinuityOverlap.value, 10);
-            this.timeline.output.continuityOverlapFrames = Number.isFinite(n)
-                ? Math.max(1, Math.min(81, n))
-                : (this.timeline.output.continuityOverlapFrames ?? 9);
+        if (continuityEligible && this.segmentContinuityOverlap) {
+            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
+                this.segmentContinuityOverlap.value
+                    ?? this.timeline.output.continuityOverlapFrames
+                    ?? DEFAULT_CONTINUITY_FRAMES,
+            );
+        } else if (this.timeline.output.continuityOverlapFrames != null) {
+            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
+                this.timeline.output.continuityOverlapFrames,
+            );
         }
         this.syncOutputToWidgets();
     }
@@ -4662,6 +5019,7 @@ class MiniMaxH3DirectorEditor {
         this.normalizeSegments();
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();
         this.updateRunSelectUI();
+        this.updateSegmentContinuityUI();
         if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
         if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
         if (this.negativePromptWidget) {
@@ -4677,9 +5035,13 @@ class MiniMaxH3DirectorEditor {
         this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
         if (syncTimeline) this.scheduleTimelineSync();
         if (!skipRender) this.scheduleRender();
-        if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
+        if (this.usesGlobalRefPanel() && taskUsesReferenceImages(this.getTaskKey())) {
             this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
-        } else if (this.isImageBatch()) this.renderImageBatchGroups();
+        }
+        if (this.usesGlobalRefPanel() && taskUsesReferenceAudios(this.getTaskKey())) {
+            this.renderRefAudioSlots();
+        }
+        if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.updateSelectionUI();
     }
 
@@ -5629,6 +5991,7 @@ class MiniMaxH3DirectorEditor {
         if (this.isPlaying || this._pauseSettling) return;
         this._resetLayoutStyles();
         this.applyZoomWidth();
+        syncBatchPanelFillHeight(this);
         this.scheduleSettleRender();
     }
 
@@ -6652,7 +7015,10 @@ class MiniMaxH3DirectorEditor {
             const refs = [...(seg.refs || [])].sort(
                 (a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0),
             );
-            const imgFile = refs.find((r) => r?.imageFile)?.imageFile || "";
+            const commonRefs = listCommonImageRefs(this);
+            const imgFile = refs.find((r) => r?.imageFile)?.imageFile
+                || commonRefs.find((r) => r?.imageFile)?.imageFile
+                || "";
             const previewB64 = seg.previewB64 || (Array.isArray(seg.previewFrames) ? seg.previewFrames[0] : "");
             const vidRef = [...(seg.refVideos || [])]
                 .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
@@ -7368,17 +7734,20 @@ class MiniMaxH3DirectorEditor {
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
         if (this.isImageBatch()) this._syncR2vCardSelection();
 
-        const hideTimeline = this.isImageBatch() || this.isGenMode();
-        const seg = this.isGlobalMode() ? null : this.timeline.segments[this.selectedIndex];
+        const r2vOn = this.isR2vCommonEnabled();
+        const hideTimeline = (this.isImageBatch() && !r2vOn) || this.isGenMode();
+        const seg = this.usesGlobalRefPanel() ? null : this.timeline.segments[this.selectedIndex];
         this.updateReferenceImageVisibility({ hideTimeline, seg: seg || null });
 
-        if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
+        if (this.usesGlobalRefPanel() && taskUsesReferenceImages(this.getTaskKey())) {
+            this.timeline.global.refs = this.timeline.global.refs || [];
             this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
         }
-        if (this.isGlobalMode() && taskUsesReferenceAudios(this.getTaskKey())) {
+        if (this.usesGlobalRefPanel() && taskUsesReferenceAudios(this.getTaskKey())) {
+            this.timeline.global.refAudios = this.timeline.global.refAudios || [];
             this.renderRefAudioSlots();
         }
-        const refVideoKey = this.isGlobalMode()
+        const refVideoKey = this.usesGlobalRefPanel()
             ? this.getTaskKey()
             : resolveTaskKey(seg?.taskType || this.timeline.global?.taskType || this.getTaskKey());
         if (taskUsesReferenceVideo(refVideoKey)) {
@@ -7396,7 +7765,7 @@ class MiniMaxH3DirectorEditor {
             if (this.genDefaultFc) this.genDefaultFc.value = defFc;
         }
 
-        if (this.isGlobalMode()) return;
+        if (this.usesGlobalRefPanel()) return;
 
         if (!seg) return;
         const liveSeg = (this._previewSegments || this.timeline.segments)?.[this.selectedIndex] || seg;
@@ -7627,17 +7996,23 @@ class MiniMaxH3DirectorEditor {
         if (toRef) {
             target.refs.push({ ...toRef, index: fromIndex, slot: undefined });
         }
-        if (isGlobal) this.timeline.global = target;
+        if (isGlobal) {
+            this.timeline.global = target;
+            if (this.isR2vCommonEnabled()) rebaseR2vGroupSlotsForCommon(this);
+        }
         this.commit();
     }
 
     removeRef(target, index) {
         target.refs = (target.refs || []).filter((r) => Number(r.index ?? r.slot) !== index);
+        if (this.isR2vCommonEnabled() && target === this.timeline.global) {
+            rebaseR2vGroupSlotsForCommon(this);
+        }
         this.commit();
     }
 
     renderRefAudioSlots() {
-        const isGlobal = this.isGlobalMode();
+        const isGlobal = this.usesGlobalRefPanel();
         const box = isGlobal ? this.globalRefAudiosBox : this.segRefAudiosBox;
         if (!box) return;
         const target = isGlobal
@@ -7754,6 +8129,9 @@ class MiniMaxH3DirectorEditor {
     removeRefAudio(target, index) {
         if (!target) return;
         target.refAudios = (target.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== index);
+        if (this.isR2vCommonEnabled() && target === this.timeline.global) {
+            rebaseR2vGroupSlotsForCommon(this);
+        }
         this.commit();
         this.renderRefAudioSlots();
     }
@@ -7789,6 +8167,10 @@ class MiniMaxH3DirectorEditor {
                 type: "input",
                 subfolder: uploaded?.subfolder || "",
             });
+            if (this.isR2vCommonEnabled() && target === this.timeline.global) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
             this.commit();
             this.renderRefAudioSlots();
         } catch (err) {
@@ -7820,7 +8202,13 @@ class MiniMaxH3DirectorEditor {
             const relPath = videoRelativePath(uploaded);
             target.refs = target.refs.filter((r) => Number(r.index ?? r.slot) !== index);
             target.refs.push({ index, imageFile: relPath, imageB64: "" });
-            if (isGlobal) this.timeline.global = target;
+            if (isGlobal) {
+                this.timeline.global = target;
+                if (this.isR2vCommonEnabled()) {
+                    rebaseR2vGroupSlotsForCommon(this);
+                    this.renderImageBatchGroups?.();
+                }
+            }
             this.commit();
         } catch (err) {
             console.error("[MiniMax H3Director] ref upload failed:", err);
@@ -7841,6 +8229,7 @@ class MiniMaxH3DirectorEditor {
                 this._stopRefVideoPreviews();
             }
             this.applyTaskLayout(prevMode);
+            this.updateSegmentContinuityUI();
         } else {
             this.timeline.global[field] = value;
         }
@@ -8726,6 +9115,7 @@ function readExternalGroupSpec(node, graph = null) {
     }
 
     return {
+        nodeId: node?.id ?? null,
         durationSec: Number.isFinite(durRaw) && durRaw > 0 ? durRaw : null,
         prompt,
         firstImageFile,
@@ -8774,7 +9164,7 @@ function passthroughUpstreamLinkId(node) {
     return linked.length ? linked[0].link : null;
 }
 
-function expandExternalGroupLink(graph, linkId, depth = 0) {
+function expandExternalGroupLink(graph, linkId, depth = 0, mode = "specs") {
     if (linkId == null || depth > 16) return [];
     const rec = graphLinkRecord(graph, linkId);
     if (!rec) return [];
@@ -8786,7 +9176,7 @@ function expandExternalGroupLink(graph, linkId, depth = 0) {
     if (isExternalGroupPassthroughNode(node)) {
         const upstream = passthroughUpstreamLinkId(node);
         if (upstream == null) return [];
-        return expandExternalGroupLink(graph, upstream, depth + 1);
+        return expandExternalGroupLink(graph, upstream, depth + 1, mode);
     }
 
     if (cls === EXTERNAL_COMBINE_NODE_TYPE) {
@@ -8801,15 +9191,17 @@ function expandExternalGroupLink(graph, linkId, depth = 0) {
             });
         for (const input of slots) {
             if (input.link == null) continue;
-            out.push(...expandExternalGroupLink(graph, input.link, depth + 1));
+            out.push(...expandExternalGroupLink(graph, input.link, depth + 1, mode));
         }
         return out;
     }
     if (EXTERNAL_GROUP_NODE_TYPES.has(cls)) {
-        return [readExternalGroupSpec(node, graph)];
+        return mode === "nodes" ? [node] : [readExternalGroupSpec(node, graph)];
     }
     // Unknown upstream packer — still reserve one slot for run-select/timeline.
+    if (mode === "nodes") return [null];
     return [{
+        nodeId: null,
         durationSec: null,
         prompt: "",
         firstImageFile: null,
@@ -8830,8 +9222,22 @@ function collectExternalGroupSpecs(editor) {
     const graph = app.graph ?? app.canvas?.graph;
     const inp = editor?.node?.inputs?.find((i) => i?.name === port);
     if (!graph || inp?.link == null) return null;
-    const specs = expandExternalGroupLink(graph, inp.link);
+    const specs = expandExternalGroupLink(graph, inp.link, 0, "specs");
     return specs.length ? specs : null;
+}
+
+function collectExternalGroupNodes(editor) {
+    const port = editor?.hasExternalI2vGroups?.()
+        ? "i2v_groups"
+        : editor?.hasExternalR2vGroups?.()
+            ? "r2v_groups"
+            : null;
+    if (!port) return null;
+    const graph = app.graph ?? app.canvas?.graph;
+    const inp = editor?.node?.inputs?.find((i) => i?.name === port);
+    if (!graph || inp?.link == null) return null;
+    const nodes = expandExternalGroupLink(graph, inp.link, 0, "nodes");
+    return nodes.length ? nodes : null;
 }
 
 function notifyDirectorsSyncExternalGroups() {
@@ -9041,7 +9447,8 @@ app.registerExtension({
                         const prev = w.callback;
                         w.callback = function (...cbArgs) {
                             const r = prev?.apply(this, cbArgs);
-                            notifyDirectorsSyncExternalGroups();
+                            // Director→Group write-through sets this to avoid echo wipe.
+                            if (!w._mmxSkipExternalSync) notifyDirectorsSyncExternalGroups();
                             return r;
                         };
                     }
@@ -9075,7 +9482,7 @@ app.registerExtension({
             const container = document.createElement("div");
             container.className = "mmx-host";
             container.style.minHeight = `${getDirectorUiHeight(null)}px`;
-            container.style.setProperty("--comfy-widget-min-height", String(getDirectorUiHeight(null)));
+            container.style.setProperty("--comfy-widget-min-height", `${getDirectorUiHeight(null)}px`);
             const self = this;
             const widget = this.addDOMWidget("minimax_director_ui", "director", container, {
                 getValue: () => "",

@@ -25,3 +25,7 @@ Thumbs.db
 # Runtime / local caches (ComfyUI output/minimax_seg_cache is outside this repo)
 .minimax_seg_cache/
 .bernini_seg_cache/
+
+# Local seam / debug probe dumps (do not publish)
+_seam_probe/
+_seam_probe_*/

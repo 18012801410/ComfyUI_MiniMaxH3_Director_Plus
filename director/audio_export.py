@@ -132,19 +132,61 @@ def _align_audio_channels(wave: torch.Tensor, channels: int) -> torch.Tensor:
     return torch.cat([wave, pad], dim=1)
 
 
-def _segment_frame_counts_for_audio(plan, n_audios: int, total_frames: int) -> list[int]:
-    """Per-segment frame lengths used to stitch generated audio under「全部导出」."""
-    segs = list(getattr(plan, "segments", None) or [])
-    if len(segs) == n_audios:
-        counts = []
-        for seg in segs:
-            fc = int(getattr(seg, "frame_count", 0) or 0)
-            if fc <= 0:
-                fc = max(0, int(getattr(seg, "end_frame", 0) or 0) - int(getattr(seg, "start_frame", 0) or 0))
-            counts.append(max(0, fc))
-        if sum(counts) > 0:
-            return counts
-    # Fallback: split total frames evenly across audio clips.
+def _ui_segment_frame_counts(plan) -> list[int]:
+    """UI / plan segment lengths (fallback when export chunk lengths unavailable)."""
+    counts = []
+    for seg in list(getattr(plan, "segments", None) or []):
+        fc = int(getattr(seg, "frame_count", 0) or 0)
+        if fc <= 0:
+            fc = max(
+                0,
+                int(getattr(seg, "end_frame", 0) or 0)
+                - int(getattr(seg, "start_frame", 0) or 0),
+            )
+        counts.append(max(0, fc))
+    return counts
+
+
+def _segment_frame_counts_for_audio(
+    plan,
+    n_audios: int,
+    total_frames: int,
+    *,
+    frame_counts: list[int] | None = None,
+) -> list[int]:
+    """Per-segment frame lengths used to stitch generated audio under「全部导出」.
+
+    Prefer explicit ``frame_counts`` (actual export chunk lengths). Never silently
+    even-split the whole timeline across a partial audio list — that desyncs A/V
+    after「选择运行」partial re-runs.
+    """
+    if frame_counts is not None and len(frame_counts) == n_audios:
+        return [max(0, int(c)) for c in frame_counts]
+
+    ui_counts = _ui_segment_frame_counts(plan)
+    if len(ui_counts) == n_audios and sum(ui_counts) > 0:
+        return ui_counts
+
+    if n_audios <= 0:
+        return []
+
+    log.warning(
+        "Audio clip count (%d) does not match export/plan segment counts "
+        "(export_counts=%s, plan_segments=%d). Filling missing slots with silence "
+        "by UI segment lengths where possible — re-run all segments once to refresh "
+        "audio cache if sync looks wrong.",
+        n_audios,
+        None if frame_counts is None else len(frame_counts),
+        len(ui_counts),
+    )
+    if ui_counts:
+        # Align by index into the plan; pad/truncate to n_audios.
+        out = list(ui_counts[:n_audios])
+        while len(out) < n_audios:
+            out.append(ui_counts[-1] if ui_counts else 0)
+        return out
+
+    # Last resort only when plan has no segments.
     n = max(1, n_audios)
     base = max(0, int(total_frames)) // n
     rem = max(0, int(total_frames)) - base * n
@@ -157,6 +199,7 @@ def _merge_generated_segment_audios(
     *,
     total_frames: int,
     fps: float,
+    frame_counts: list[int] | None = None,
 ) -> dict[str, Any]:
     """Concatenate per-segment AV audio into one timeline for merged video export."""
     sr = SILENT_SAMPLE_RATE
@@ -164,7 +207,9 @@ def _merge_generated_segment_audios(
         if _audio_has_samples(gen):
             sr = int(gen.get("sample_rate") or sr) or SILENT_SAMPLE_RATE
             break
-    counts = _segment_frame_counts_for_audio(plan, len(segment_audios), total_frames)
+    counts = _segment_frame_counts_for_audio(
+        plan, len(segment_audios), total_frames, frame_counts=frame_counts,
+    )
     parts: list[torch.Tensor] = []
     max_ch = 2
     for i, gen in enumerate(segment_audios):
@@ -201,6 +246,7 @@ def build_director_audio_outputs(
     export_segments: bool,
     output_frame_end: int | None = None,
     segment_audios: list | None = None,
+    segment_frame_counts: list[int] | None = None,
     audio_mode: str | None = None,
     mute_audio: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -208,6 +254,9 @@ def build_director_audio_outputs(
 
     source_fallback is None or "silent" when audioMode=source could not
     extract a usable track (falls back to mute, never model audio).
+
+    ``segment_frame_counts`` should match ``segment_audios`` and the export
+    chunk lengths (post continuity trim) so partial re-runs stay in sync.
     """
     fps = float(plan.frame_rate or 24.0)
     mode = AUDIO_MODE_MUTE if mute_audio else (audio_mode or resolve_audio_mode(plan))
@@ -220,12 +269,30 @@ def build_director_audio_outputs(
     if mode == AUDIO_MODE_GENERATE and segment_audios:
         # 「全部导出」合并画面时 images_out 只有 1 条，必须把各组音频按时间轴拼接，
         # 否则只会用第 1 组音频并静音填充后半段（第二组及之后无声）。
-        if len(images_out) == 1 and len(segment_audios) > 1:
+        # Also merge when a single clip is present but we still have a full
+        # timeline audio table (partial re-run + cached audio restore).
+        merge_all = (
+            len(images_out) == 1
+            and (
+                len(segment_audios) > 1
+                or (
+                    segment_frame_counts is not None
+                    and len(segment_frame_counts) == len(segment_audios)
+                    and len(segment_audios) >= 1
+                    and len(list(getattr(plan, "segments", None) or [])) > 1
+                )
+            )
+        )
+        if merge_all:
             n_frames = int(getattr(images_out[0], "shape", [0])[0] or 0)
             if n_frames <= 0:
                 n_frames = int(output_frame_end or getattr(plan, "total_frames", 0) or 0)
             merged = _merge_generated_segment_audios(
-                plan, segment_audios, total_frames=n_frames, fps=fps,
+                plan,
+                segment_audios,
+                total_frames=n_frames,
+                fps=fps,
+                frame_counts=segment_frame_counts,
             )
             if _audio_has_samples(merged):
                 log.info(

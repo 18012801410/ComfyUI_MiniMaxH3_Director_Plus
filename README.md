@@ -17,11 +17,12 @@
 | **多段时间轴** | 节点内上传视频，支持切分、均分、智能分镜分割（PySceneDetect）、追加；分割点可选中删除；可视化时间轴预览每段范围与缩略图 |
 | **多任务模式** | `task_type`：`t2v`（文生视频）、`i2v`（图生视频）、`fl2v`（首尾帧生视频）、`r2v`（参考主体生视频 / 素材组）、`v2v`（视频转视频）、`rv2v`（参考素材改视频） |
 | **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」上传首帧和/或尾帧（官方支持只传尾帧）；拖缘调时长；提示词写中间运动；支持「选择运行」只跑部分组 |
-| **参考素材组 (r2v)** | fl2v 式分组 UI：每组图片1–9 / 音频1–3 / 视频1–3；提示词用 `<Picture N>` / `<Video K>` / `<Audio J>`（或 `@` 引用）；时间轴预览与选中状态同步 |
+| **参考素材组 (r2v)** | fl2v 式分组 UI：上方「公共参数」共享参考图/音频与公共提示词（与每组提示词拼接）；每组可再挂图片1–9 / 音频1–3 / 视频1–3；提示词用 `<Picture N>` / `<Video K>` / `<Audio J>`（或 `@` 引用）；时间轴预览与选中状态同步 |
 | **源视频编辑 (v2v / rv2v)** | Bernini 风格源视频时间轴；每段源画面自动绑定 `<Video 1>`；`rv2v` 另可挂参考图（图片1–9）与参考音频（音频1–3） |
 | **选择运行** | 开启后只采样勾选的片段/素材组；未勾选段可用缓存或源画面填充（全部导出时） |
 | **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
+| **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
 
 ### 输入 / 输出
@@ -119,9 +120,10 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 ### 参考主体 r2v 用法摘要
 
 1. 任务类型选 **「参考主体生视频 (r2v)」**（需 **ref2va** UNET + audio_vae）
-2. 点击「添加素材组」；在组内上传图片1–9 / 音频1–3 / 视频1–3
-3. 提示词中用 `<Picture N>` / `<Video K>` / `<Audio J>`，或输入 `@` 选择已上传素材
-4. 时间轴可预览各组时长与缩略图；「选择运行」与素材组勾选同步
+2. 点击 **「启用公共参数」** 展开面板（默认折叠/关闭）；上传共用参考图/音频并写公共提示词（如角色锁定 / `subject_definitions`）；启用后会与每组提示词拼接
+3. 点击「添加素材组」；每组写分镜提示词，可按需再挂本组独有素材（同槽位覆盖公共素材）
+4. 提示词中用 `<Picture N>` / `<Video K>` / `<Audio J>`，或输入 `@`（启用公共参数时可引用公共 + 本组素材）
+5. 时间轴可预览各组时长与缩略图；「选择运行」与素材组勾选同步
 
 ### 源视频 v2v / rv2v 用法摘要
 
@@ -171,6 +173,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 - [Comfy-Org / ComfyUI](https://github.com/Comfy-Org/ComfyUI) — 官方 MiniMax H3 支持
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 模型
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — 权重与文档
+- [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动/音频续拍思路参考
 
 ## 许可证
 

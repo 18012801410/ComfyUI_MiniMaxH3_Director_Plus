@@ -148,6 +148,9 @@ export function newFl2vShot(overrides = {}) {
         negativePrompt: overrides.negativePrompt || DEFAULT_FL2V_NEGATIVE,
         startImage: normalizeImageRef(overrides.startImage || overrides.start_image) || null,
         endImage: normalizeImageRef(overrides.endImage || overrides.end_image) || null,
+        ...(overrides.externalNodeId != null
+            ? { externalNodeId: overrides.externalNodeId }
+            : {}),
     };
 }
 

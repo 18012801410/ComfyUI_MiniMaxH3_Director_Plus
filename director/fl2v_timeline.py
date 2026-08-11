@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from ..lib.image_prep import fit_canvas, fit_video_long_edge, resolve_output_dimensions
+from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge, resolve_output_dimensions
 from ..lib.task_prompts import resolve_task_key, task_type_option_label, TASK_PROMPT_BY_KEY
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.fl2v")
@@ -554,11 +554,11 @@ def build_fl2v_director_plan(
             )
 
     # runSelection uses shot indices when shots[] is present; else keyframe indices.
+    # Keep full shot list for continuity neighbors; honor selection via run_indices.
     run_count = len(timeline.get("shots") or []) if used_explicit_shots else len(keyframes)
     run_sel = _parse_run_selection(timeline, max(1, run_count))
     if run_sel is not None:
-        shots = [s for s in shots if int(s["source_index"]) in run_sel]
-        if not shots:
+        if not any(int(s["source_index"]) in run_sel for s in shots):
             raise ValueError(
                 "MiniMax H3 Director: 「选择运行」已开启，但未勾选任何首尾帧组。"
                 "请勾选至少一组再执行。"
@@ -588,6 +588,7 @@ def build_fl2v_director_plan(
         fixed_width=int(output_block.get("width") or timeline.get("width") or width),
         fixed_height=int(output_block.get("height") or timeline.get("height") or height),
     )
+    assert_minimax_canvas(out_w, out_h)
 
     export_mode = _resolve_export_mode(output_block)
     fallback_prompt = (global_block.get("prompt") or global_prompt or "").strip()
@@ -607,6 +608,7 @@ def build_fl2v_director_plan(
 
     segments: list[SegmentPlan] = []
     source_clips: list[torch.Tensor] = []
+    selected_plan_indices: list[int] = []
     plan_index = 0
     for shot in shots:
         start_kf = shot.get("start")
@@ -670,6 +672,8 @@ def build_fl2v_director_plan(
             source_clips.append(end_img[:1].clone())
 
         end_f = start_f + fc
+        if run_sel is None or int(shot["source_index"]) in run_sel:
+            selected_plan_indices.append(plan_index)
         segments.append(
             SegmentPlan(
                 index=plan_index,
@@ -690,12 +694,26 @@ def build_fl2v_director_plan(
         raise ValueError(
             "fl2v: 没有可运行的组。请添加一组并上传首帧和/或尾帧。"
         )
+    if run_sel is not None and not selected_plan_indices:
+        raise ValueError(
+            "MiniMax H3 Director: 「选择运行」已开启，但未勾选任何首尾帧组。"
+            "请勾选至少一组再执行。"
+        )
 
     source_video = torch.full((len(segments), 16, 16, 3), 0.5, dtype=torch.float32)
     raw = dict(timeline)
     raw["timelineMode"] = "fl2v"
     raw["keyframes"] = keyframes
     raw["totalFrames"] = timeline_total
+
+    from .segment_continuity import resolve_continuity_settings
+
+    continuity_enabled, continuity_overlap = resolve_continuity_settings(
+        timeline, segment_count=len(segments)
+    )
+    run_indices = (
+        frozenset(selected_plan_indices) if run_sel is not None else None
+    )
 
     return DirectorPlan(
         frame_rate=fps,
@@ -715,5 +733,7 @@ def build_fl2v_director_plan(
         edit_mode="segment",
         raw=raw,
         export_mode=export_mode,
-        run_indices=None,
+        run_indices=run_indices,
+        continuity_enabled=continuity_enabled,
+        continuity_overlap_frames=continuity_overlap,
     )

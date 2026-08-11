@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 
-from ..lib.image_prep import fit_canvas, fit_video_long_edge, resolve_output_dimensions
+from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge, resolve_output_dimensions
 from ..lib.ref_audios import MAX_REFERENCE_AUDIOS
 from ..lib.ref_images import MAX_REFERENCE_IMAGES
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS
@@ -261,6 +261,7 @@ def _resolve_dims(timeline: dict, width: int, height: int, ref_max_size: int, sa
         fixed_height=int(output_block.get("height") or timeline.get("height") or height or 480),
     )
     export_mode = _resolve_export_mode(output_block)
+    assert_minimax_canvas(out_w, out_h)
     return out_w, out_h, ref_max, out_mode, export_mode
 
 
@@ -351,6 +352,10 @@ def build_plan_from_external_groups(
         SegmentRef,
         SegmentRefAudio,
         SegmentRefVideo,
+        _load_ref_audios,
+        _load_refs,
+        concat_common_segment_prompt,
+        merge_indexed_refs,
         reinforce_r2v_prompt,
     )
 
@@ -359,17 +364,29 @@ def build_plan_from_external_groups(
     task_key = resolve_task_key(task_type)
     label = task_type_option_label(TASK_PROMPT_BY_KEY.get(task_key) or TASK_PROMPT_BY_KEY["t2v"])
     task_label = task_type or label
+    global_block = timeline.get("global") or {}
     fallback_prompt = (
-        ((timeline.get("global") or {}).get("prompt") or global_prompt or "")
+        (global_block.get("prompt") or global_prompt or "")
     ).strip()
+    common_enabled = bool(
+        global_block.get("commonEnabled")
+        if global_block.get("commonEnabled") is not None
+        else global_block.get("common_enabled")
+    )
 
     indices = _run_selection_filter(timeline, len(groups))
     if not indices:
         raise ValueError("External groups: no groups selected to run.")
 
-    selected = [(i, groups[i]) for i in indices]
+    # Keep the full group list so「段间引导」can pin the true previous neighbor
+    # (via cache) even when「选择运行」only samples a subset — same model as
+    # native prompt_batch / source timelines (run_indices, not compacted plan).
+    all_indexed = list(enumerate(groups))
+    run_indices = (
+        frozenset(indices) if len(indices) < len(groups) else None
+    )
     sample_img = None
-    for _, g in selected:
+    for _, g in all_indexed:
         sample_img = g.get("first_frame")
         if sample_img is None:
             sample_img = g.get("last_frame")
@@ -384,10 +401,25 @@ def build_plan_from_external_groups(
         timeline, width, height, ref_max_size, sample_img
     )
 
+    common_refs_raw = (
+        _load_refs(global_block.get("refs") or []) if (family == "r2v" and common_enabled) else []
+    )
+    common_audios_raw = (
+        _load_ref_audios(
+            global_block.get("refAudios") or global_block.get("ref_audios") or []
+        )
+        if (family == "r2v" and common_enabled)
+        else []
+    )
+
     segments: list[SegmentPlan] = []
     cursor = 0
-    for plan_idx, (src_index, g) in enumerate(selected):
-        prompt = (g.get("prompt") or "").strip() or fallback_prompt
+    for plan_idx, (src_index, g) in enumerate(all_indexed):
+        group_prompt = (g.get("prompt") or "").strip()
+        if family == "r2v" and common_enabled:
+            prompt = concat_common_segment_prompt(fallback_prompt, group_prompt)
+        else:
+            prompt = group_prompt or fallback_prompt
         try:
             dur = float(g.get("duration_sec") or DEFAULT_FL2V_DURATION_SEC)
         except (TypeError, ValueError):
@@ -464,13 +496,31 @@ def build_plan_from_external_groups(
                 )
             )
         else:
-            # r2v
+            # r2v — per-group media + Director timeline.global common media/prompt
             refs = []
             for idx, tensor in sorted((g.get("ref_images") or {}).items()):
                 fitted = _fit_image(
                     tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
                 )
                 refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
+            if common_refs_raw:
+                common_fitted = []
+                for cref in common_refs_raw:
+                    fitted = _fit_image(
+                        cref.tensor,
+                        width=seg_w,
+                        height=seg_h,
+                        output_mode=seg_mode,
+                        ref_max_size=ref_max,
+                    )
+                    common_fitted.append(
+                        SegmentRef(
+                            index=int(cref.index),
+                            tensor=fitted[:1].clone(),
+                            image_file=getattr(cref, "image_file", "") or "",
+                        )
+                    )
+                refs = merge_indexed_refs(common_fitted, refs)
             ref_videos = []
             for idx, frames in sorted((g.get("ref_videos") or {}).items()):
                 fitted = _fit_image(
@@ -483,6 +533,8 @@ def build_plan_from_external_groups(
                 SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
                 for idx, aud in sorted((g.get("ref_audios") or {}).items())
             ]
+            if common_audios_raw:
+                ref_audios = merge_indexed_refs(common_audios_raw, ref_audios)
             ref_video_audios = [
                 SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
                 for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
@@ -520,7 +572,7 @@ def build_plan_from_external_groups(
     raw["externalGroups"] = {
         "source": family,
         "count": len(groups),
-        "selected": indices,
+        "selected": list(indices),
         "active": True,
     }
     if family == "i2v":
@@ -529,6 +581,12 @@ def build_plan_from_external_groups(
         raw["timelineMode"] = "prompt_batch"
     raw["totalFrames"] = total
     raw["editMode"] = "segment"
+
+    from .segment_continuity import resolve_continuity_settings
+
+    continuity_enabled, continuity_overlap = resolve_continuity_settings(
+        timeline, segment_count=len(segments)
+    )
 
     return DirectorPlan(
         frame_rate=fps,
@@ -542,11 +600,13 @@ def build_plan_from_external_groups(
         global_task_type=task_label,
         global_task_key=task_key,
         global_prompt=fallback_prompt,
-        global_refs=[],
+        global_refs=list(common_refs_raw) if family == "r2v" else [],
         source_video=source_video,
         segments=segments,
         edit_mode="segment",
         raw=raw,
         export_mode=export_mode,
-        run_indices=None,  # already filtered
+        run_indices=run_indices,
+        continuity_enabled=continuity_enabled,
+        continuity_overlap_frames=continuity_overlap,
     )

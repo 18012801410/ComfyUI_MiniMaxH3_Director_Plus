@@ -247,7 +247,16 @@ def build_source_images_output(
 ) -> list[torch.Tensor]:
     if split_outputs:
         chunks: list[torch.Tensor] = []
-        for seg, generated in zip(plan.segments, images_out):
+        # images_out is run-order (选择运行), not full timeline order.
+        segs = plan.segments
+        run_idx = getattr(plan, "run_indices", None)
+        if run_idx is not None:
+            segs = [
+                plan.segments[i]
+                for i in sorted(run_idx)
+                if 0 <= i < len(plan.segments)
+            ]
+        for seg, generated in zip(segs, images_out):
             target_len = int(generated.shape[0])
             raw = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
             fitted = _fit_source_clip_to_plan(plan, raw)
@@ -295,6 +304,7 @@ def finalize_director_outputs(
     *,
     export_source_images: bool = False,
     segment_audios: list | None = None,
+    segment_frame_counts: list[int] | None = None,
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
@@ -326,12 +336,16 @@ def finalize_director_outputs(
     audio_frame_end = frame_count if not split_for_audio else None
     audio_mode = resolve_audio_mode(plan)
     use_generated = audio_mode == AUDIO_MODE_GENERATE
+    # Prefer caller-provided export lengths (post continuity trim); else match IMAGE batches.
+    if segment_frame_counts is None and segment_audios and split_for_audio:
+        segment_frame_counts = [int(s.shape[0]) for s in segment_outputs]
     audio_out, source_fallback = build_director_audio_outputs(
         plan,
         images_out,
         export_segments=split_for_audio,
         output_frame_end=audio_frame_end,
         segment_audios=segment_audios if use_generated else None,
+        segment_frame_counts=segment_frame_counts if use_generated else None,
         audio_mode=audio_mode,
     )
     report = report + source_audio_report_note(

@@ -18,11 +18,12 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 | **Multi-segment timeline** | Upload video in-node; split, equal-split, smart shot-split (PySceneDetect), append; selectable/deletable split points; visual timeline with thumbs |
 | **Task modes** | `t2v`, `i2v`, `fl2v` (first/last frame), `r2v` (reference material groups), `v2v` (video-to-video), `rv2v` (reference-guided source edit) |
 | **First/last frame (fl2v)** | Dedicated shot groups: add group → start and/or end frame (official FL2VA allows end-only); drag edges for duration; run-select per group |
-| **Reference groups (r2v)** | fl2v-style groups: up to 9 images / 3 audios / 3 videos per group; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
+| **Reference groups (r2v)** | fl2v-style groups: top **Common params** share refs/audio and a common prompt (concatenated with each group prompt); each group may add images 1–9 / audios 1–3 / videos 1–3; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
 | **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
 | **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
 | **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
+| **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
 | **Run report** | `report` output with plan and per-segment summary |
 
 ### Inputs / outputs
@@ -102,11 +103,34 @@ This repo ships examples under `example_workflows/`:
 2. Load an example from [article 506](https://comfyit.cn/article/506) or `example_workflows/`
 3. Connect UNET / CLIP / video_vae / audio_vae, edit the timeline UI, Queue
 
+**Video tutorial:** [Bilibili playlist · plugin usage](https://space.bilibili.com/1997403556/lists/8357740)
+
 ### Default sampling
 
 - Canvas default **0.4MP 16:9 (864×480)**, **5s / 124** frames @ **24 fps** (17k+5 grid)
 - **25** steps, `res_multistep` + `simple`, CFG **1.0**
 - Sigma shift: video **12** / audio **3**
+
+### First/last frame (fl2v) — short guide
+
+1. Set task type to **First/Last Frame to Video (fl2v)**
+2. Click **Add group**, upload start and/or end frame (end-only is allowed)
+3. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
+4. Queue; with multiple groups, use **Run select** to sample only some of them
+
+### Reference groups (r2v) — short guide
+
+1. Set task type to **Reference to Video (r2v)** (**ref2va** UNET + audio_vae)
+2. Click **Enable common params** (collapsed/off by default); upload shared refs/audio and write a common prompt (e.g. character lock / `subject_definitions`); when enabled it is concatenated with each group prompt
+3. Click **Add material group**; write per-shot prompts and optionally add group-only assets (same slot overrides common)
+4. In prompts use `<Picture N>` / `<Video K>` / `<Audio J>`, or type `@` (with common params on, picker includes common + group assets)
+5. Timeline previews group duration/thumbs; Run-select stays in sync with group checkboxes
+
+### Source video (v2v / rv2v) — short guide
+
+1. Choose **v2v** or **rv2v**, upload a source video and split segments (cut / equal-split / smart split)
+2. Write a prompt per segment; the source clip is bound as `<Video 1>` automatically
+3. For `rv2v`, optionally add reference images / audio; audio mode can be generate / source / mute
 
 ### External multi-group wiring
 
@@ -115,15 +139,18 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 1. Add **`MiniMax H3 Director Group (Image to Video)`** or **`(Reference to Video)`**
 2. Wire per group: `prompt` / `duration_sec`; I2V family uses `first_frame` / `last_frame` (none=t2v, first only=i2v, last only or both=fl2v); R2V uses Autogrow slots (same as official Reference to Video: images ≤9, videos ≤3, audios ≤3). Output size is set on the **Director**
 3. Batch with **`Director Groups Combine`** (Autogrow slots, same UX as official Reference to Video) → Director `i2v_groups` / `r2v_groups`; a single `group` can connect to the Director directly
-4. Match `task_type` to the port; do not connect both ports at once
+4. Match `task_type` to the port (t2v/i2v/fl2v ↔ `i2v_groups`; r2v ↔ `r2v_groups`); do not connect both ports at once
 5. When linked, graph wiring overrides UI cards (external priority); Run-select still applies by group index
 
 ## Ecosystem · [Comfyit](https://comfyit.cn/)
+
+[Comfyit](https://comfyit.cn/) provides environment, models, workflows, and tutorials:
 
 | Resource | Link |
 |----------|------|
 | Models & workflows pack | [comfyit.cn/article/506](https://comfyit.cn/article/506) |
 | Official MiniMax H3 docs | [docs.comfy.org · MiniMax H3](https://docs.comfy.org/tutorials/video/minimax/minimax-h3) |
+| Plugin video tutorials | [Bilibili playlist](https://space.bilibili.com/1997403556/lists/8357740) |
 | Product center | [comfyit.cn/products](https://comfyit.cn/products) |
 | Plugins | [comfyit.cn/plugins](https://comfyit.cn/plugins) |
 | Models | [comfyit.cn/resources/models](https://comfyit.cn/resources/models) |
@@ -138,6 +165,7 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 | **Sibling plugin** | [ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director) |
 | **Author QQ** | **3697688140** |
 | **Bilibili** | [space.bilibili.com/1997403556](https://space.bilibili.com/1997403556) |
+| **Plugin tutorials** | [Bilibili playlist · usage](https://space.bilibili.com/1997403556/lists/8357740) |
 | **QQ groups** | **551482703** · **425064221** · **559826331** |
 | **Comfyit** | [comfyit.cn](https://comfyit.cn/) |
 
@@ -146,6 +174,7 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 - [Comfy-Org / ComfyUI](https://github.com/Comfy-Org/ComfyUI) — official MiniMax H3 support
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 model
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
+- [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
 
 ## License
 

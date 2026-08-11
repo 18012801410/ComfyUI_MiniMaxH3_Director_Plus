@@ -41,6 +41,134 @@ function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
 }
 
+function _refHasImage(r) {
+    return !!(r?.imageFile || r?.imageB64);
+}
+
+function _refHasAudio(r) {
+    return !!(r?.audioFile || r?.fileName);
+}
+
+/** Highest filled absolute index + 1 (0 when empty). */
+export function nextRefIndexAfter(refs, hasFn) {
+    let max = -1;
+    for (const r of refs || []) {
+        if (!hasFn(r)) continue;
+        const idx = Number(r.index ?? r.slot);
+        if (Number.isFinite(idx) && idx >= 0) max = Math.max(max, idx);
+    }
+    return max + 1;
+}
+
+/** When common params are on, group picture slots start after common's last filled index. */
+export function r2vCommonPicOffset(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return 0;
+    return Math.min(
+        R2V_PICTURE_SLOTS,
+        nextRefIndexAfter(editor.timeline?.global?.refs, _refHasImage),
+    );
+}
+
+export function r2vCommonAudioOffset(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return 0;
+    return Math.min(
+        MAX_REFERENCE_AUDIOS,
+        nextRefIndexAfter(editor.timeline?.global?.refAudios, _refHasAudio),
+    );
+}
+
+export function listCommonImageRefs(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return [];
+    return [...(editor.timeline?.global?.refs || [])]
+        .filter(_refHasImage)
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
+}
+
+/**
+ * Keep group slots from colliding with common indices.
+ * - Legacy (all group pics still 图片1…): shift the block up by picOff.
+ * - Partial collisions (common grew into a group index): bump each colliding
+ *   slot to the next free absolute index >= offset.
+ */
+function _rebaseIndexedMedia(list, hasFn, offset, maxSlots) {
+    if (offset <= 0 || !Array.isArray(list) || !list.length) {
+        return { list, changed: false };
+    }
+    const items = list.filter(hasFn);
+    if (!items.length) return { list, changed: false };
+    const idxs = items.map((r) => Number(r.index ?? r.slot));
+    const hasLow = idxs.some((i) => Number.isFinite(i) && i < offset);
+    if (!hasLow) return { list, changed: false };
+    const hasHigh = idxs.some((i) => Number.isFinite(i) && i >= offset);
+
+    // Legacy: entire group still uses 图片1…N → move as a block.
+    if (!hasHigh) {
+        return {
+            changed: true,
+            list: list.map((r) => {
+                if (!hasFn(r)) return r;
+                const i = Number(r.index ?? r.slot);
+                if (!Number.isFinite(i)) return r;
+                const next = i + offset;
+                if (next >= maxSlots) return null;
+                return { ...r, index: next, slot: undefined };
+            }).filter(Boolean),
+        };
+    }
+
+    // Mixed: only bump colliding (low) entries into free high slots.
+    const used = new Set(
+        idxs.filter((i) => Number.isFinite(i) && i >= offset),
+    );
+    let nextFree = offset;
+    const takeFree = () => {
+        while (nextFree < maxSlots && used.has(nextFree)) nextFree += 1;
+        if (nextFree >= maxSlots) return null;
+        const n = nextFree;
+        used.add(n);
+        nextFree += 1;
+        return n;
+    };
+    let changed = false;
+    const out = list.map((r) => {
+        if (!hasFn(r)) return r;
+        const i = Number(r.index ?? r.slot);
+        if (!Number.isFinite(i) || i >= offset) return r;
+        const n = takeFree();
+        if (n == null) return null;
+        changed = true;
+        return { ...r, index: n, slot: undefined };
+    }).filter(Boolean);
+    return { list: out, changed };
+}
+
+export function rebaseR2vGroupSlotsForCommon(editor) {
+    if (!editor?.isR2vCommonEnabled?.()) return false;
+    const picOff = r2vCommonPicOffset(editor);
+    const audOff = r2vCommonAudioOffset(editor);
+    if (picOff <= 0 && audOff <= 0) return false;
+    let changed = false;
+    for (const seg of editor.timeline?.segments || []) {
+        if (Array.isArray(seg.refs) && seg.refs.length) {
+            const r = _rebaseIndexedMedia(seg.refs, _refHasImage, picOff, R2V_PICTURE_SLOTS);
+            if (r.changed) {
+                seg.refs = r.list;
+                changed = true;
+            }
+        }
+        if (Array.isArray(seg.refAudios) && seg.refAudios.length) {
+            const r = _rebaseIndexedMedia(
+                seg.refAudios, _refHasAudio, audOff, MAX_REFERENCE_AUDIOS,
+            );
+            if (r.changed) {
+                seg.refAudios = r.list;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
 export function formatMediaDuration(sec) {
     if (!Number.isFinite(sec) || sec < 0) return "--:--";
     const total = Math.max(0, Math.round(sec));
@@ -168,10 +296,32 @@ function applyBatchSegmentDuration(editor, index, rawSec) {
     return editor.timeline.segments[index] || null;
 }
 
+/**
+ * Pull prompt textareas into timeline.segments by card index.
+ * Must run before normalize / re-render / timeline sync — otherwise edits sit on
+ * stale segment objects (or only in the DOM) and get wiped.
+ */
+export function flushBatchPromptInputs(editor) {
+    const list = editor?.batchList;
+    if (!list) return;
+    const segs = editor?.timeline?.segments;
+    if (!Array.isArray(segs) || !segs.length) return;
+    list.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
+        const index = parseInt(el.getAttribute("data-batch-prompt-index"), 10);
+        if (!Number.isFinite(index) || index < 0 || index >= segs.length) return;
+        const live = segs[index];
+        if (!live) return;
+        live.prompt = el.value || "";
+        live.negativePrompt = live.negativePrompt ?? "";
+    });
+}
+
 /** Flush visible 秒数 inputs into segments before a full card re-render. */
 function flushBatchDurationInputs(editor) {
     const list = editor?.batchList;
     if (!list) return;
+    // Persist prompts first — duration apply/normalize must not drop textarea drafts.
+    flushBatchPromptInputs(editor);
     const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     if (!isVideoBatchTask(taskKey)) return;
     for (const input of list.querySelectorAll("input[data-batch-sec-index]")) {
@@ -227,8 +377,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none}
 .bd-batch-run-all.hidden{display:none!important}
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
-/* max-height must stay in sync with BATCH_LIST_MAX_H in getImageBatchUiHeight(). */
-.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
+/* Default cap; batch-fill mode overrides via .bd-wrap.bd-batch-fill + JS max-height. */
+.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -249,12 +399,12 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-card.selected,.bd-batch-card.selected.done{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-batch-card.run-on:not(.run-skipped){border-color:#3a7a55}
 .bd-batch-card.selected.run-on,.bd-batch-card.selected.run-on.done{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.4)}
-.bd-batch-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.bd-batch-head{grid-column:1/-1;display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:wrap}
 .bd-batch-r2v .bd-batch-head{padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:2px}
 .bd-batch-head b{color:#ccc;font-size:11px}
 .bd-batch-r2v .bd-batch-head b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .bd-batch-run-check{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f;flex-shrink:0}
-.bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
 .bd-batch-fc input{width:72px;background:#181818;border:1px solid #444;border-radius:5px;color:#eee;padding:5px 8px;font-size:13px}
@@ -264,13 +414,19 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-del:hover{background:#3a1515}
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:120px}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
-.bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch}
+.bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch;min-height:420px}
 .bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0}
-.bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
+.bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:380px}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
 .bd-r2v-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
 .bd-r2v-section-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#eaeaea}
 .bd-r2v-section-count{font-size:11px;color:#7d7d7d;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.bd-r2v-common-inherit{border-style:dashed;border-color:#3a4a5a;background:#0a1218}
+.bd-r2v-common-inherit .bd-r2v-section-title{color:#9ab;text-transform:none;letter-spacing:.02em;font-size:11px}
+.bd-r2v-common-inherit .bd-batch-ref{cursor:default;border-color:#2a3a4a}
+.bd-r2v-common-inherit .bd-batch-ref:hover{border-color:#2a3a4a;background:#080808;transform:none}
+.bd-r2v-common-inherit .bd-batch-ref .cap{color:#8af}
+.bd-r2v-slot-hint{font-size:10px;color:#6a7a8a;line-height:1.35;margin:0}
 .bd-batch-src{width:88px;height:88px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:9px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-src.has-img{border-style:solid;border-color:#444}
 .bd-batch-src img{width:100%;height:100%;object-fit:contain;background:#000}
@@ -330,11 +486,11 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-r2v .bd-batch-audio:hover .x,.bd-batch-r2v .bd-batch-video:hover .x{display:flex}
 .bd-batch-prompts{display:flex;flex-direction:column;gap:4px;min-width:0}
 .bd-batch-prompts .bd-label{color:#888;font-size:10px}
-.bd-batch-r2v .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;flex:1 1 auto;min-height:260px;display:flex;flex-direction:column}
+.bd-batch-r2v .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;flex:1 1 auto;min-height:380px;display:flex;flex-direction:column}
 .bd-batch-r2v .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .bd-batch-prompts textarea{width:100%;min-height:88px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;box-sizing:border-box;font-family:inherit;line-height:1.35}
 .bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea{min-height:120px;height:100%;resize:vertical}
-.bd-batch-r2v .bd-batch-prompts textarea{min-height:240px;height:100%;flex:1;resize:vertical;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
+.bd-batch-r2v .bd-batch-prompts textarea{min-height:360px;height:100%;flex:1;resize:vertical;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:220px;min-height:160px;justify-self:end}
 .bd-batch-r2v .bd-batch-preview{min-height:220px;flex:0 0 auto;height:auto;border-radius:10px;border-color:#262626;background:#0c0c0c;padding:8px;font-size:11px;color:#666}
@@ -480,10 +636,11 @@ function cloneRefs(refs) {
     }
 }
 
-/** Copy global.refs into batch segments that have no refs (r2i / r2v). */
+/** Copy global.refs into batch segments that have no refs (r2i only).
+ *  r2v keeps refs on timeline.global as shared「公共参数」merged at plan time. */
 export function migrateGlobalRefsIntoBatchSegments(editor, taskKey) {
     const key = resolveTaskKey(taskKey || editor.getTaskKey?.() || "");
-    if (key !== "r2i" && key !== "r2v") return false;
+    if (key !== "r2i") return false;
     const globalRefs = editor.timeline?.global?.refs;
     if (!Array.isArray(globalRefs) || !globalRefs.length) return false;
     let moved = false;
@@ -493,6 +650,19 @@ export function migrateGlobalRefsIntoBatchSegments(editor, taskKey) {
         moved = true;
     }
     return moved;
+}
+
+function mergeMediaByIndex(commonList, localList) {
+    const byIdx = new Map();
+    for (const item of commonList || []) {
+        const idx = Number(item?.index ?? item?.slot);
+        if (Number.isFinite(idx)) byIdx.set(idx, item);
+    }
+    for (const item of localList || []) {
+        const idx = Number(item?.index ?? item?.slot);
+        if (Number.isFinite(idx)) byIdx.set(idx, item);
+    }
+    return [...byIdx.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
 }
 
 export function ensureImageBatchTimeline(editor) {
@@ -557,12 +727,20 @@ export function ensureImageBatchTimeline(editor) {
 }
 
 export function normalizeImageBatchSegments(editor) {
+    // Keep textarea drafts on the live segment objects before touching them.
+    flushBatchPromptInputs(editor);
     const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     const isVideo = isVideoBatchTask(taskKey);
     const defFc = defaultFrameCount(taskKey);
     const defSec = defaultDurationSec(taskKey);
     let start = 0;
-    const fixed = [];
+    const segs = editor.timeline.segments || [];
+    // Mutate in place so card closures (prompt oninput) stay attached to the
+    // same objects. Replacing with `{ ...seg }` orphans DOM writes and can
+    // wipe group 5/6 prompts on the next sync/re-render.
+    if (!segs.length) {
+        editor.timeline.segments = [newBatchSegment({ durationSec: defSec })];
+    }
     for (const seg of editor.timeline.segments) {
         let fc = 1;
         let durationSec;
@@ -573,28 +751,25 @@ export function normalizeImageBatchSegments(editor) {
             );
             fc = resolved.frames;
             durationSec = resolved.durationSec;
+            seg.durationSec = durationSec;
+            seg._videoFrameCount = fc;
         }
-        fixed.push({
-            ...seg,
-            start,
-            length: fc,
-            frameCount: fc,
-            ...(isVideo ? { durationSec } : {}),
-            negativePrompt: seg.negativePrompt ?? "",
-            genImage: seg.genImage || { imageFile: "" },
-            refs: seg.refs || [],
-            refAudios: seg.refAudios || [],
-            refVideos: seg.refVideos || [],
-            _videoFrameCount: isVideo ? fc : seg._videoFrameCount,
-            previewB64: seg.previewB64 || "",
-            previewFrames: seg.previewFrames || [],
-            previewFps: seg.previewFps || parseFloat(editor.frameRateWidget?.value || 24),
-        });
+        seg.start = start;
+        seg.length = fc;
+        seg.frameCount = fc;
+        seg.negativePrompt = seg.negativePrompt ?? "";
+        seg.genImage = seg.genImage || { imageFile: "" };
+        seg.refs = seg.refs || [];
+        seg.refAudios = seg.refAudios || [];
+        seg.refVideos = seg.refVideos || [];
+        seg.previewB64 = seg.previewB64 || "";
+        seg.previewFrames = seg.previewFrames || [];
+        seg.previewFps = seg.previewFps || parseFloat(editor.frameRateWidget?.value || 24);
+        if (!seg.id) seg.id = newBatchSegment().id;
         start += fc;
     }
-    if (!fixed.length) fixed.push(newBatchSegment({ durationSec: defSec }));
-    editor.timeline.segments = fixed;
-    editor.timeline.totalFrames = start || fixed[0].frameCount;
+    const out = editor.timeline.segments;
+    editor.timeline.totalFrames = start || out[0]?.frameCount || defFc;
 }
 
 export function addImageBatchGroup(editor) {
@@ -861,20 +1036,37 @@ function fileBaseName(path) {
     return s.split("/").pop() || s;
 }
 
-function countFilledRefs(seg) {
+function countFilledRefs(seg, { picOffset = 0, audOffset = 0 } = {}) {
     let imgs = 0;
     let videos = 0;
     let audios = 0;
     for (const r of seg.refs || []) {
         const idx = Number(r.index ?? r.slot);
-        if (r?.imageFile && Number.isFinite(idx) && idx >= 0 && idx < R2V_PICTURE_SLOTS) imgs += 1;
+        if (
+            r?.imageFile
+            && Number.isFinite(idx)
+            && idx >= picOffset
+            && idx < R2V_PICTURE_SLOTS
+        ) {
+            imgs += 1;
+        }
     }
     for (const r of seg.refVideos || []) {
         if (r?.videoFile || r?.fileName || r?.previewImageFile || r?.previewImageUrl || r?.linked) {
             videos += 1;
         }
     }
-    for (const r of seg.refAudios || []) if (r?.audioFile || r?.fileName) audios += 1;
+    for (const r of seg.refAudios || []) {
+        const idx = Number(r.index ?? r.slot);
+        if (
+            (r?.audioFile || r?.fileName)
+            && Number.isFinite(idx)
+            && idx >= audOffset
+            && idx < MAX_REFERENCE_AUDIOS
+        ) {
+            audios += 1;
+        }
+    }
     return { imgs, videos, audios };
 }
 
@@ -1091,32 +1283,82 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
  * @returns {HTMLElement} main column for prompt/preview
  */
 function appendR2vMediaSections(card, seg, index, editor) {
-    const counts = countFilledRefs(seg);
+    const picOffset = r2vCommonPicOffset(editor);
+    const audOffset = r2vCommonAudioOffset(editor);
+    const picSlots = Math.max(0, R2V_PICTURE_SLOTS - picOffset);
+    const audSlots = Math.max(0, MAX_REFERENCE_AUDIOS - audOffset);
+    const counts = countFilledRefs(seg, { picOffset, audOffset });
+    const commonImgs = listCommonImageRefs(editor);
     const body = document.createElement("div");
     body.className = "bd-batch-r2v-body";
 
     const assets = document.createElement("div");
     assets.className = "bd-batch-r2v-assets";
 
+    // Inherited common pictures (read-only preview) so groups still "see" shared cast.
+    if (commonImgs.length) {
+        const inherit = createR2vSection(
+            t("batch.r2v.commonInheritPics"),
+            `${commonImgs.length}`,
+        );
+        inherit.classList.add("bd-r2v-common-inherit");
+        const inheritGrid = document.createElement("div");
+        inheritGrid.className = "bd-batch-refs";
+        for (const ref of commonImgs) {
+            const abs = Number(ref.index ?? ref.slot ?? 0);
+            const slot = document.createElement("div");
+            slot.className = "bd-batch-ref has-img";
+            slot.title = t("batch.r2v.commonInheritTip", { label: refImageLabel(abs) });
+            const img = document.createElement("img");
+            img.src = viewUrl(ref.imageFile);
+            img.draggable = false;
+            slot.appendChild(img);
+            const cap = document.createElement("span");
+            cap.className = "cap";
+            cap.textContent = refImageLabel(abs);
+            slot.appendChild(cap);
+            inheritGrid.appendChild(slot);
+        }
+        inherit.appendChild(inheritGrid);
+        assets.appendChild(inherit);
+    }
+
+    const groupPicTitle = picOffset > 0
+        ? t("batch.r2v.sectionPicturesFrom", { n: picOffset + 1 })
+        : t("batch.r2v.sectionPictures");
     const imgSection = createR2vSection(
-        t("batch.r2v.sectionPictures"),
-        `${counts.imgs}/${R2V_PICTURE_SLOTS}`,
+        groupPicTitle,
+        picSlots > 0 ? `${counts.imgs}/${picSlots}` : "0/0",
     );
+    if (picOffset > 0) {
+        const hint = document.createElement("p");
+        hint.className = "bd-r2v-slot-hint";
+        hint.textContent = t("batch.r2v.slotContinueHint", {
+            from: picOffset + 1,
+            common: picOffset,
+        });
+        imgSection.appendChild(hint);
+    }
     const refs = document.createElement("div");
     refs.className = "bd-batch-refs";
     if (!editor._r2vPicsVisible) editor._r2vPicsVisible = {};
     const segKey = String(seg.id ?? index);
-    let highestFilled = -1;
+    let highestLocal = -1;
     for (const r of seg.refs || []) {
         const idx = Number(r.index ?? r.slot);
-        if (r?.imageFile && Number.isFinite(idx)) highestFilled = Math.max(highestFilled, idx);
+        if (r?.imageFile && Number.isFinite(idx) && idx >= picOffset) {
+            highestLocal = Math.max(highestLocal, idx - picOffset);
+        }
     }
-    const minVisible = highestFilled >= 0
-        ? Math.min(R2V_PICTURE_SLOTS, Math.ceil((highestFilled + 1) / R2V_PICTURE_STEP) * R2V_PICTURE_STEP)
-        : R2V_PICTURE_STEP;
-    let visible = Number(editor._r2vPicsVisible[segKey]) || R2V_PICTURE_STEP;
-    visible = Math.max(R2V_PICTURE_STEP, Math.min(R2V_PICTURE_SLOTS, visible));
-    if (visible < minVisible) visible = minVisible;
+    const minVisible = highestLocal >= 0
+        ? Math.min(picSlots, Math.ceil((highestLocal + 1) / R2V_PICTURE_STEP) * R2V_PICTURE_STEP)
+        : Math.min(picSlots, R2V_PICTURE_STEP);
+    let visible = Number(editor._r2vPicsVisible[segKey]) || Math.min(picSlots, R2V_PICTURE_STEP);
+    visible = Math.max(0, Math.min(picSlots, visible));
+    if (picSlots > 0) {
+        visible = Math.max(Math.min(picSlots, R2V_PICTURE_STEP), Math.min(picSlots, visible));
+        if (visible < minVisible) visible = minVisible;
+    }
     editor._r2vPicsVisible[segKey] = visible;
 
     const applyPicVisibility = () => {
@@ -1125,49 +1367,59 @@ function appendR2vMediaSections(card, seg, index, editor) {
         });
     };
 
-    for (let i = 0; i < R2V_PICTURE_SLOTS; i++) {
-        const ref = (seg.refs || []).find((r) => Number(r.index ?? r.slot) === i);
-        const slot = document.createElement("div");
-        slot.className = "bd-batch-ref";
-        if (i >= visible) slot.classList.add("bd-r2v-pic-hidden");
-        renderR2vRefSlot(slot, ref, i, index, editor);
-        slot.onclick = () => {
-            if (editor._batchRefDragMoved) {
-                editor._batchRefDragMoved = false;
-                return;
-            }
-            uploadSegRef(editor, index, i);
-        };
-        bindBatchRefDrop(slot, editor, index, i);
-        refs.appendChild(slot);
-    }
-    imgSection.appendChild(refs);
+    if (picSlots <= 0) {
+        const empty = document.createElement("p");
+        empty.className = "bd-r2v-slot-hint";
+        empty.textContent = t("batch.r2v.noGroupPicSlots");
+        imgSection.appendChild(empty);
+    } else {
+        for (let local = 0; local < picSlots; local++) {
+            const abs = picOffset + local;
+            const ref = (seg.refs || []).find((r) => Number(r.index ?? r.slot) === abs);
+            const slot = document.createElement("div");
+            slot.className = "bd-batch-ref";
+            if (local >= visible) slot.classList.add("bd-r2v-pic-hidden");
+            renderR2vRefSlot(slot, ref, abs, index, editor);
+            slot.onclick = () => {
+                if (editor._batchRefDragMoved) {
+                    editor._batchRefDragMoved = false;
+                    return;
+                }
+                uploadSegRef(editor, index, abs);
+            };
+            bindBatchRefDrop(slot, editor, index, abs);
+            refs.appendChild(slot);
+        }
+        imgSection.appendChild(refs);
 
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "bd-r2v-pics-toggle";
-    const syncToggleLabel = () => {
-        if (visible < R2V_PICTURE_SLOTS) {
-            const next = Math.min(R2V_PICTURE_STEP, R2V_PICTURE_SLOTS - visible);
-            toggle.textContent = t("batch.r2v.expandPics", { n: next });
-        } else {
-            toggle.textContent = t("batch.r2v.collapsePics");
+        if (picSlots > R2V_PICTURE_STEP) {
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "bd-r2v-pics-toggle";
+            const syncToggleLabel = () => {
+                if (visible < picSlots) {
+                    const next = Math.min(R2V_PICTURE_STEP, picSlots - visible);
+                    toggle.textContent = t("batch.r2v.expandPics", { n: next });
+                } else {
+                    toggle.textContent = t("batch.r2v.collapsePics");
+                }
+            };
+            syncToggleLabel();
+            toggle.onclick = (e) => {
+                e.stopPropagation();
+                if (visible < picSlots) {
+                    visible = Math.min(picSlots, visible + R2V_PICTURE_STEP);
+                } else {
+                    visible = Math.max(Math.min(picSlots, R2V_PICTURE_STEP), minVisible);
+                }
+                editor._r2vPicsVisible[segKey] = visible;
+                applyPicVisibility();
+                syncToggleLabel();
+                editor.updateDomWidgetHeight?.();
+            };
+            imgSection.appendChild(toggle);
         }
-    };
-    syncToggleLabel();
-    toggle.onclick = (e) => {
-        e.stopPropagation();
-        if (visible < R2V_PICTURE_SLOTS) {
-            visible = Math.min(R2V_PICTURE_SLOTS, visible + R2V_PICTURE_STEP);
-        } else {
-            visible = Math.max(R2V_PICTURE_STEP, minVisible);
-        }
-        editor._r2vPicsVisible[segKey] = visible;
-        applyPicVisibility();
-        syncToggleLabel();
-        editor.updateDomWidgetHeight?.();
-    };
-    imgSection.appendChild(toggle);
+    }
     assets.appendChild(imgSection);
 
     const videoSection = createR2vSection(
@@ -1193,27 +1445,38 @@ function appendR2vMediaSections(card, seg, index, editor) {
     videoSection.appendChild(videos);
     assets.appendChild(videoSection);
 
+    const groupAudTitle = audOffset > 0
+        ? t("batch.r2v.sectionAudiosFrom", { n: audOffset + 1 })
+        : t("batch.r2v.sectionAudios");
     const audioSection = createR2vSection(
-        t("batch.r2v.sectionAudios"),
-        `${counts.audios}/${MAX_REFERENCE_AUDIOS}`,
+        groupAudTitle,
+        audSlots > 0 ? `${counts.audios}/${audSlots}` : "0/0",
     );
     const audios = document.createElement("div");
     audios.className = "bd-batch-audios";
-    for (let i = 0; i < MAX_REFERENCE_AUDIOS; i++) {
-        const ref = (seg.refAudios || []).find((r) => Number(r.index ?? r.slot) === i);
-        const slot = document.createElement("div");
-        renderAudioSlot(slot, ref, i, index, editor, { r2v: true });
-        slot.onclick = (e) => {
-            if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
-            if (ref && e.target.closest?.(".bd-r2v-thumb")) {
-                slot.querySelector(".bd-r2v-play")?.click();
-                return;
-            }
-            uploadSegAudio(editor, index, i);
-        };
-        audios.appendChild(slot);
+    if (audSlots <= 0 && audOffset > 0) {
+        const empty = document.createElement("p");
+        empty.className = "bd-r2v-slot-hint";
+        empty.textContent = t("batch.r2v.noGroupAudioSlots");
+        audioSection.appendChild(empty);
+    } else {
+        for (let local = 0; local < audSlots; local++) {
+            const abs = audOffset + local;
+            const ref = (seg.refAudios || []).find((r) => Number(r.index ?? r.slot) === abs);
+            const slot = document.createElement("div");
+            renderAudioSlot(slot, ref, abs, index, editor, { r2v: true });
+            slot.onclick = (e) => {
+                if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+                if (ref && e.target.closest?.(".bd-r2v-thumb")) {
+                    slot.querySelector(".bd-r2v-play")?.click();
+                    return;
+                }
+                uploadSegAudio(editor, index, abs);
+            };
+            audios.appendChild(slot);
+        }
+        audioSection.appendChild(audios);
     }
-    audioSection.appendChild(audios);
     assets.appendChild(audioSection);
 
     const main = document.createElement("div");
@@ -1331,7 +1594,7 @@ function mountLivePreview(el, seg, badgeText) {
     el.appendChild(wrap);
 }
 
-function mountVideoPreview(el, seg, running, fps) {
+function mountVideoPreview(el, seg, running, fps, editor) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
@@ -1350,6 +1613,11 @@ function mountVideoPreview(el, seg, running, fps) {
     const frames = (seg.previewFrames?.length ? seg.previewFrames : null)
         || (seg.previewB64 ? [seg.previewB64] : null);
     if (!frames?.length) {
+        const refFile = firstRefPreviewFile(editor, seg);
+        if (refFile) {
+            mountRefStillPreview(el, refFile);
+            return;
+        }
         el.textContent = t("batch.previewVideoAfterRun");
         return;
     }
@@ -1403,7 +1671,23 @@ function mountVideoPreview(el, seg, running, fps) {
     };
 }
 
-function renderImagePreview(el, seg, running) {
+function firstRefPreviewFile(editor, seg) {
+    const groupFile = [...(seg?.refs || [])]
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
+        .find((r) => r?.imageFile)?.imageFile;
+    if (groupFile) return groupFile;
+    return listCommonImageRefs(editor).find((r) => r?.imageFile)?.imageFile || "";
+}
+
+function mountRefStillPreview(el, imageFile) {
+    el.innerHTML = "";
+    const img = document.createElement("img");
+    img.src = viewUrl(imageFile);
+    img.alt = "ref preview";
+    el.appendChild(img);
+}
+
+function renderImagePreview(el, seg, running, editor) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
@@ -1426,17 +1710,24 @@ function renderImagePreview(el, seg, running) {
         el.appendChild(img);
         return;
     }
+    const refFile = firstRefPreviewFile(editor, seg);
+    if (refFile) {
+        mountRefStillPreview(el, refFile);
+        return;
+    }
     el.textContent = t("batch.previewAfterRun");
 }
 
-function renderPreview(el, seg, running, isVideo, fps) {
-    if (isVideo) mountVideoPreview(el, seg, running, fps);
-    else renderImagePreview(el, seg, running);
+function renderPreview(el, seg, running, isVideo, fps, editor) {
+    if (isVideo) mountVideoPreview(el, seg, running, fps, editor);
+    else renderImagePreview(el, seg, running, editor);
 }
 
 export function renderImageBatchGroups(editor) {
     const list = editor.batchList;
     if (!list) return;
+    // Recover drafts before wiping the DOM (duration flush also flushes prompts).
+    flushBatchPromptInputs(editor);
     flushBatchDurationInputs(editor);
     stopAllPlayers(list);
     const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
@@ -1454,7 +1745,13 @@ export function renderImageBatchGroups(editor) {
     const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     if (editor.batchI2vNotice) {
         const needsRefs = key === "r2i" || key === "r2v";
-        const hasAnyMedia = (editor.timeline.segments || []).some((s) => (
+        const global = editor.timeline.global || {};
+        const commonOn = key === "r2v" && !!(global.commonEnabled ?? global.common_enabled);
+        const hasCommonMedia = commonOn && (
+            (global.refs || []).some((r) => r?.imageFile)
+            || (global.refAudios || []).some((r) => r?.audioFile || r?.fileName)
+        );
+        const hasAnyMedia = hasCommonMedia || (editor.timeline.segments || []).some((s) => (
             (s.refs || []).some((r) => r?.imageFile)
             || (s.refAudios || []).some((r) => r?.audioFile || r?.fileName)
             || (s.refVideos || []).some((r) => (
@@ -1634,26 +1931,44 @@ export function renderImageBatchGroups(editor) {
         const ph = t(isR2v ? "placeholder.batchR2v" : "placeholder.batchDefault");
         prompts.innerHTML = `
             <span class="bd-label">${t("batch.prompt")}</span>
-            <textarea data-f="prompt" placeholder=""></textarea>`;
+            <textarea data-f="prompt" data-batch-prompt-index="${index}" placeholder=""></textarea>`;
         prompts.querySelector("textarea").placeholder = ph;
         prompts.querySelector("textarea").value = seg.prompt || "";
         const promptEl = prompts.querySelector('[data-f="prompt"]');
+        const segIndex = index;
+        const segId = seg.id;
         promptEl.oninput = (e) => {
-            seg.prompt = e.target.value;
-            seg.negativePrompt = "";
+            // Write by index/id — never capture a stale `seg` after normalize.
+            const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
+                || editor.timeline.segments?.[segIndex];
+            if (!live) return;
+            live.prompt = e.target.value;
+            live.negativePrompt = live.negativePrompt ?? "";
             editor.scheduleTimelineSync();
+            // External groups execute from Group-node widgets — keep them aligned.
+            editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
         };
         if (isR2v) {
-            wirePromptImageMentions(editor, promptEl, () => ({
-                refs: seg.refs || [],
-                audios: seg.refAudios || [],
-                videos: seg.refVideos || [],
-            }));
+            wirePromptImageMentions(editor, promptEl, () => {
+                const g = editor.timeline?.global || {};
+                const on = !!(g.commonEnabled ?? g.common_enabled);
+                const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
+                    || editor.timeline.segments?.[segIndex]
+                    || seg;
+                // Absolute indices: common 图片1…N + group 图片N+1… (no renumber clash).
+                return {
+                    refs: on ? mergeMediaByIndex(g.refs || [], live.refs || []) : (live.refs || []),
+                    audios: on
+                        ? mergeMediaByIndex(g.refAudios || [], live.refAudios || [])
+                        : (live.refAudios || []),
+                    videos: live.refVideos || [],
+                };
+            });
         }
 
         const preview = document.createElement("div");
         preview.className = "bd-batch-preview";
-        renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps);
+        renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor);
 
         if (isR2v && r2vMain) {
             r2vMain.appendChild(prompts);
@@ -1723,8 +2038,9 @@ export function bindImageBatchEvents(editor) {
     });
 }
 
-/** Keep in sync with `.bd-batch-list { max-height: 640px }` above. */
-const BATCH_LIST_MAX_H = 640;
+/** Default list viewport when the node is at content-sized height (not user-stretched). */
+export const BATCH_LIST_MAX_H = 640;
+const BATCH_LIST_MIN_H = 160;
 const BATCH_LIST_GAP = 8;
 const BATCH_TOOLBAR_H = 48;
 const BATCH_PANEL_CHROME = 28;
@@ -1738,6 +2054,120 @@ export function getImageBatchUiHeight(editor) {
     const listContentH = n * rowH + Math.max(0, n - 1) * BATCH_LIST_GAP;
     const listH = Math.min(listContentH, BATCH_LIST_MAX_H);
     return BATCH_TOOLBAR_H + BATCH_PANEL_CHROME + listH;
+}
+
+function _clearBatchListFillStyles(list, host, wrap, panel) {
+    if (list) {
+        list.style.height = "";
+        list.style.maxHeight = "";
+        list.style.minHeight = "";
+        list.style.flex = "";
+    }
+    if (panel) {
+        panel.style.flex = "";
+        panel.style.minHeight = "";
+        panel.style.height = "";
+    }
+    if (wrap) {
+        wrap.style.height = "";
+    }
+    if (host) host.style.height = "";
+}
+
+/**
+ * When the Director node is taller than the content minimum, grow the batch list
+ * viewport to fill leftover space (still scroll when groups overflow).
+ */
+export function syncBatchPanelFillHeight(editor) {
+    const list = editor?.batchList;
+    const wrap = editor?.root;
+    const host = editor?.container;
+    const panel = editor?.batchPanel;
+    if (!list || !wrap || !host) return;
+
+    const batchOn = !!editor.isImageBatch?.()
+        && !panel?.classList?.contains("hidden");
+    wrap.classList.toggle("bd-batch-fill", batchOn);
+    if (!batchOn) {
+        _clearBatchListFillStyles(list, host, wrap, panel);
+        editor._domWidgetStretchH = 0;
+        return;
+    }
+
+    const minH = typeof editor.getDirectorUiMinHeight === "function"
+        ? editor.getDirectorUiMinHeight()
+        : 0;
+    const node = editor.node;
+    const widget = editor.domWidget;
+    let stretch = minH || BATCH_LIST_MAX_H;
+    if (node?.size && widget) {
+        let other = 48;
+        for (const w of node.widgets || []) {
+            if (w === widget) continue;
+            try {
+                const s = w.computeSize?.(node.size[0]);
+                const wh = Array.isArray(s) ? Number(s[1]) : Number(s);
+                other += Number.isFinite(wh) && wh > 0 ? wh : 20;
+            } catch {
+                other += 20;
+            }
+        }
+        stretch = Math.max(minH || BATCH_LIST_MAX_H, (node.size[1] || 0) - other);
+        editor._domWidgetStretchH = stretch;
+        widget.computeSize = (width) => {
+            const nextMin = typeof editor.getDirectorUiMinHeight === "function"
+                ? editor.getDirectorUiMinHeight()
+                : stretch;
+            return [width, Math.max(nextMin, editor._domWidgetStretchH || stretch)];
+        };
+    }
+
+    // Force host/wrap to the node-allocated height so flex children can fill it.
+    host.style.height = `${stretch}px`;
+    host.style.minHeight = `${minH || stretch}px`;
+    host.style.setProperty("--comfy-widget-min-height", `${minH || stretch}px`);
+    wrap.style.height = `${stretch}px`;
+
+    const applyListCap = () => {
+        if (!editor.batchList || editor.batchPanel?.classList?.contains("hidden")) return;
+        const hostH = host.clientHeight || stretch;
+        if (hostH < 120) return;
+
+        const status = wrap.querySelector(".bd-run-status");
+        const statusH = status && !status.classList.contains("hidden")
+            ? (status.offsetHeight + 8)
+            : 0;
+
+        // Measure chrome above the list inside the batch panel (toolbar / notice).
+        const toolbar = panel?.querySelector?.(".bd-batch-toolbar");
+        const notice = panel?.querySelector?.(".bd-batch-i2v-notice");
+        const noticeH = notice?.classList?.contains("visible") ? (notice.offsetHeight + 8) : 0;
+        const panelChrome = (toolbar?.offsetHeight || 0) + noticeH + 12;
+
+        const hostRect = host.getBoundingClientRect();
+        const panelRect = panel?.getBoundingClientRect?.();
+        if (!panelRect || !(hostRect.height > 0)) return;
+
+        // Panel should occupy host bottom minus status; list fills panel minus chrome.
+        const panelAvail = Math.floor(hostRect.bottom - panelRect.top - statusH - 4);
+        const listAvail = Math.floor(panelAvail - panelChrome);
+        const h = Math.max(BATCH_LIST_MIN_H, listAvail);
+
+        if (panel) {
+            panel.style.flex = "1 1 0";
+            panel.style.minHeight = "0";
+            panel.style.height = `${Math.max(h + panelChrome, panelAvail)}px`;
+        }
+        list.style.flex = "1 1 0";
+        list.style.height = `${h}px`;
+        list.style.maxHeight = `${h}px`;
+        list.style.minHeight = `${Math.min(BATCH_LIST_MIN_H, h)}px`;
+    };
+
+    applyListCap();
+    requestAnimationFrame(applyListCap);
+    // Second frame: after ComfyUI/DOM widget finishes settling node chrome.
+    requestAnimationFrame(() => requestAnimationFrame(applyListCap));
 }
 
 export function setToolbarDisabledForBatch(editor, disabled) {

@@ -94,13 +94,18 @@ def source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
 
 
 def segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
-    """Best-effort fill for skipped segments (gen source clip, then timeline video)."""
-    if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
-        target_len = max(1, seg.frame_count or int(seg.source_clip.shape[0]))
-        clip = seg.source_clip.clone()
-        if clip.shape[0] > target_len:
-            clip = clip[:target_len]
-        return clip.cpu().float()
+    """Best-effort fill for skipped segments from **real source video** only.
+
+    Gen timelines (t2v/r2v/i2v/fl2v batch) use gray canvases or held refs as
+    ``source_clip`` — never splice those into「全部导出」or the merge goes gray.
+    Unselected gen segments must come from disk cache instead.
+    """
+    if is_gen_timeline_plan(plan):
+        return None
+    if (plan.raw or {}).get("externalGroups", {}).get("active"):
+        # External i2v/r2v packs also lack real camera footage for fill.
+        if not needs_source_video(seg.task_key) or seg.task_key in {"i2v", "fl2v"}:
+            return None
     if needs_source_video(seg.task_key):
         try:
             return source_passthrough_chunk(plan, seg)
