@@ -2166,18 +2166,19 @@ function _clearBatchListFillStyles(list, host, wrap, panel) {
     if (host) host.style.height = "";
 }
 
-/** Remember user-dragged node height so Run/progress sync won't forget it. */
-function captureDomWidgetStretchFromNode(editor, { floor = 0 } = {}) {
+function _domWidgetMinHeight(editor, floor = 0) {
     const minH = typeof editor?.getDirectorUiMinHeight === "function"
         ? editor.getDirectorUiMinHeight()
         : 0;
+    return Math.max(minH || 0, floor || 0);
+}
+
+/** DOM-widget height implied by current node.size (read-only; does not persist). */
+function measureDomWidgetStretchFromNode(editor, { floor = 0 } = {}) {
+    const base = _domWidgetMinHeight(editor, floor);
     const node = editor?.node;
     const widget = editor?.domWidget;
-    const base = Math.max(minH || 0, floor || 0);
-    if (!node?.size || !widget) {
-        if (base > 0) editor._domWidgetStretchH = base;
-        return base;
-    }
+    if (!node?.size || !widget) return base;
     let other = 48;
     for (const w of node.widgets || []) {
         if (w === widget) continue;
@@ -2189,15 +2190,60 @@ function captureDomWidgetStretchFromNode(editor, { floor = 0 } = {}) {
             other += 20;
         }
     }
-    const stretch = Math.max(base, (node.size[1] || 0) - other);
-    editor._domWidgetStretchH = stretch;
+    return Math.max(base, (node.size[1] || 0) - other);
+}
+
+/** Resolved host height: content min + last *user* stretch (never derived from progress sync). */
+export function resolveDomWidgetStretchH(editor, { floor = 0 } = {}) {
+    const base = _domWidgetMinHeight(editor, floor);
+    return Math.max(base, editor?._domWidgetStretchH || 0);
+}
+
+/** Wire widget.computeSize to honor remembered user stretch without rewriting it. */
+export function bindDomWidgetStretchComputeSize(editor) {
+    const widget = editor?.domWidget;
+    if (!widget) return resolveDomWidgetStretchH(editor);
     widget.computeSize = (width) => {
         const nextMin = typeof editor.getDirectorUiMinHeight === "function"
             ? editor.getDirectorUiMinHeight()
-            : stretch;
-        return [width, Math.max(nextMin, editor._domWidgetStretchH || stretch)];
+            : 0;
+        return [width, Math.max(nextMin || 0, editor._domWidgetStretchH || 0)];
     };
+    return resolveDomWidgetStretchH(editor);
+}
+
+/**
+ * Persist user-dragged node height so Queue/progress grow-only sync won't snap back (#7).
+ * Call only from user resize paths — never from progress ticks (that ratchets forever).
+ */
+export function rememberDomWidgetStretchFromNode(editor, { floor = 0 } = {}) {
+    if (!editor) return 0;
+    if (editor._programmaticSizeSync) return resolveDomWidgetStretchH(editor, { floor });
+    if (performance.now() < (editor._ignoreStretchCaptureUntil || 0)) {
+        return resolveDomWidgetStretchH(editor, { floor });
+    }
+    const stretch = measureDomWidgetStretchFromNode(editor, { floor });
+    editor._domWidgetStretchH = stretch;
+    bindDomWidgetStretchComputeSize(editor);
     return stretch;
+}
+
+/**
+ * One-shot: if the graph restored a taller-than-content node, keep that height as
+ * stretch so batch fill / Queue sync honor it. Safe — not called on progress ticks.
+ */
+export function seedDomWidgetStretchFromNodeIfNeeded(editor) {
+    if (!editor || editor._domWidgetStretchSeeded) return resolveDomWidgetStretchH(editor);
+    editor._domWidgetStretchSeeded = true;
+    if ((editor._domWidgetStretchH || 0) > 0) {
+        bindDomWidgetStretchComputeSize(editor);
+        return editor._domWidgetStretchH;
+    }
+    const minH = _domWidgetMinHeight(editor);
+    const measured = measureDomWidgetStretchFromNode(editor);
+    if (measured > minH + 8) editor._domWidgetStretchH = measured;
+    bindDomWidgetStretchComputeSize(editor);
+    return resolveDomWidgetStretchH(editor);
 }
 
 /**
@@ -2216,18 +2262,17 @@ export function syncBatchPanelFillHeight(editor) {
     wrap.classList.toggle("bd-batch-fill", batchOn);
     if (!batchOn) {
         _clearBatchListFillStyles(list, host, wrap, panel);
-        // Keep stretch for non-batch modes too (common panel / timeline), so Queue
-        // progress resize sync does not snap the node back to content min (#7).
-        captureDomWidgetStretchFromNode(editor);
+        // Re-bind computeSize from remembered stretch only — do not re-measure
+        // node.size here (progress sync would ratchet height upward).
+        bindDomWidgetStretchComputeSize(editor);
         return;
     }
 
     const minH = typeof editor.getDirectorUiMinHeight === "function"
         ? editor.getDirectorUiMinHeight()
         : 0;
-    const stretch = captureDomWidgetStretchFromNode(editor, {
-        floor: minH || BATCH_LIST_MAX_H,
-    });
+    const stretch = resolveDomWidgetStretchH(editor, { floor: minH || 0 });
+    bindDomWidgetStretchComputeSize(editor);
 
     // Force host/wrap to the node-allocated height so flex children can fill it.
     host.style.height = `${stretch}px`;

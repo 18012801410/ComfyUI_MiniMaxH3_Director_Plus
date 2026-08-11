@@ -57,6 +57,8 @@ import {
     setImageBatchPreview,
     setR2vToolbar,
     setToolbarDisabledForBatch,
+    rememberDomWidgetStretchFromNode,
+    seedDomWidgetStretchFromNodeIfNeeded,
     syncBatchPanelFillHeight,
     updateR2vToolbarBtns,
     wireBatchRunSelectControls,
@@ -933,19 +935,32 @@ function hookTaskTypeWidget(node) {
     };
 }
 
+/** Grow node height without treating the change as a user drag (avoids stretch ratchet). */
+function growDirectorNodeHeight(node, editor, nextH) {
+    if (!node?.size || nextH == null) return false;
+    const curH = node.size[1] || 0;
+    if (curH >= nextH - 2) return false;
+    if (editor) {
+        editor._programmaticSizeSync = true;
+        editor._ignoreStretchCaptureUntil = performance.now() + 300;
+    }
+    try {
+        node.setSize([node.size[0], nextH]);
+        node.setDirtyCanvas?.(true, true);
+    } finally {
+        if (editor) editor._programmaticSizeSync = false;
+    }
+    return true;
+}
+
 function syncDirectorNodeSize(node, editor) {
     if (editor?.isPlaying) return;
     if (!node?.computeSize) return;
     if (editor) editor.updateDomWidgetHeight?.();
     const sz = node.computeSize();
-    const curH = node.size?.[1] || 0;
-    const nextH = sz?.[1];
     // Grow for content (e.g. run progress bar); never shrink a user-resized node
     // — otherwise Queue/progress sync snaps height back to content minimum (#7).
-    if (nextH != null && curH < nextH - 2) {
-        node.setSize([node.size[0], nextH]);
-        node.setDirtyCanvas?.(true, true);
-    }
+    growDirectorNodeHeight(node, editor, sz?.[1]);
 }
 
 function ensureDirectorDomWidgetWidth(node) {
@@ -1017,6 +1032,7 @@ function initDirectorEditor(node) {
         node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        seedDomWidgetStretchFromNodeIfNeeded(node._minimaxEditor);
         syncDirectorNodeSize(node, node._minimaxEditor);
         return node._minimaxEditor;
     } catch (err) {
@@ -1669,11 +1685,7 @@ class MiniMaxH3DirectorEditor {
         // (batch list fills the extra height via syncBatchPanelFillHeight).
         if (this.node?.computeSize && !this.isPlaying) {
             const sz = this.node.computeSize();
-            const curH = this.node.size?.[1] || 0;
-            if (sz?.[1] != null && curH < sz[1] - 2) {
-                this.node.setSize([this.node.size[0], sz[1]]);
-                this.node.setDirtyCanvas?.(true, true);
-            }
+            growDirectorNodeHeight(this.node, this, sz?.[1]);
         }
         syncBatchPanelFillHeight(this);
     }
@@ -6047,6 +6059,8 @@ class MiniMaxH3DirectorEditor {
 
     onNodeResize() {
         if (this.isPlaying || this._pauseSettling) return;
+        // Only user drags should persist stretch; programmatic grow (progress) skips.
+        rememberDomWidgetStretchFromNode(this);
         this._resetLayoutStyles();
         this.applyZoomWidth();
         syncBatchPanelFillHeight(this);
