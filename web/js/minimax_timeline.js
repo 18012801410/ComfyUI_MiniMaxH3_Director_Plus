@@ -458,18 +458,27 @@ const STYLES = `
   display:flex;flex-direction:column
 }
 .bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0}
+/* Fixed min so progress text wrap does not change node chrome height every tick. */
+.bd-run-status{min-height:52px;box-sizing:border-box}
 /* Solo material group (class set by syncBatchPanelFillHeight): card fills the list. */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;align-self:stretch}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0;height:auto}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:0}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;max-height:100%;align-self:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0;height:auto;max-height:100%}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:0;max-height:100%;overflow:hidden}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{flex:1 1 auto;min-height:200px;height:auto!important}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
+  flex:1 1 auto;min-height:200px;max-height:100%;height:auto!important;overflow:auto
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-wrap,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-editor,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-batch-prompts textarea{
+  max-height:100%
+}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source{align-content:stretch}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-prompts,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts{height:100%;min-height:0}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts{height:100%;min-height:0;max-height:100%;overflow:hidden}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
@@ -988,11 +997,14 @@ function healOversizedDirectorNode(node, editor) {
 /** Grow once when content min increases (mode switch); never shrink; never use stretch. */
 function ensureDirectorNodeFitsContent(node, editor) {
     if (!node?.size || !node.computeSize) return false;
+    // Progress ticks must not grow the node — status text / rebuild noise used to ratchet.
+    if (editor?.runStatusEl?.classList?.contains("active")) return false;
     bindDomWidgetContentComputeSize(editor);
     const ideal = node.computeSize()?.[1];
     if (ideal == null) return false;
     if ((node.size[1] || 0) >= ideal - 2) return false;
-    node.setSize([node.size[0], ideal]);
+    const maxOk = ideal + DIRECTOR_UI_MAX_EXTRA_H;
+    node.setSize([node.size[0], Math.min(ideal, maxOk)]);
     node.setDirtyCanvas?.(true, true);
     return true;
 }
@@ -1720,17 +1732,32 @@ class MiniMaxH3DirectorEditor {
         return getDirectorUiHeight(this);
     }
 
-    updateDomWidgetHeight() {
+    updateDomWidgetHeight(opts = {}) {
         const h = contentDomWidgetMinHeight(this) || getDirectorUiHeight(this);
         this.container?.style.setProperty("--comfy-widget-min-height", `${h}px`);
         if (this.container) this.container.style.minHeight = `${h}px`;
         // Content min only — never bake node.size / stretch into computeSize.
         bindDomWidgetContentComputeSize(this);
+        const runActive = !!this.runStatusEl?.classList?.contains("active");
         // Grow only when content needs more room (e.g. mode switch). Never shrink
-        // a user-enlarged node (#7). Ideal height is content-based, so this cannot
-        // ratchet the way stretch-from-node.size did.
-        if (!this.isPlaying) ensureDirectorNodeFitsContent(this.node, this);
-        syncBatchPanelFillHeight(this);
+        // a user-enlarged node (#7). During live progress: never grow; heal runaway.
+        if (!this.isPlaying) {
+            if (runActive) healOversizedDirectorNode(this.node, this);
+            else ensureDirectorNodeFitsContent(this.node, this);
+        }
+        syncBatchPanelFillHeight(this, {
+            settle: opts.settle !== false && !runActive,
+        });
+    }
+
+    /** Patch batch card `.running` without tearing down the list (progress path). */
+    _syncBatchRunHighlight() {
+        if (!this.isImageBatch?.() || !this.batchList) return;
+        const runningIdx = this._runHighlightSeg;
+        this.batchList.querySelectorAll(".bd-batch-card").forEach((card, i) => {
+            card.classList.toggle("running", i === runningIdx);
+        });
+        this._syncR2vCardSelection?.();
     }
 
     scheduleRender() {
@@ -8807,6 +8834,7 @@ class MiniMaxH3DirectorEditor {
             this.runOverallEl.style.width = "100%";
             this.runPhaseEl.style.width = "100%";
             this._runHighlightSeg = -1;
+            this._runProgressSegKey = null;
             this.updateRunSelectUI();
             if (this.isImageBatch()) this.renderImageBatchGroups();
             else this.scheduleRender();
@@ -8852,11 +8880,19 @@ class MiniMaxH3DirectorEditor {
         this.runDetailEl.textContent = parts.join(" · ");
         this.runOverallEl.style.width = `${overallPct}%`;
         this.runPhaseEl.style.width = `${phasePct}%`;
-        // Progress text can grow the status bar — resize host so the timeline
-        // canvas is not flex-squashed (fl2v repeat thumbs look stretched).
-        syncDirectorNodeSize(this.node, this);
-        if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.scheduleRender();
+        // Do NOT syncDirectorNodeSize / full batch rebuild every tick — that was the
+        // cross-mode (t2v/i2v/r2v/…) infinite-height feedback loop. Status has a fixed
+        // min-height; live previews patch in place via minimax_director_preview.
+        const segKey = `${timelineSeg}|${detail.phase}|${runSeg}`;
+        const segChanged = this._runProgressSegKey !== segKey;
+        this._runProgressSegKey = segKey;
+        if (this.isImageBatch()) {
+            this._syncBatchRunHighlight();
+            if (segChanged) healOversizedDirectorNode(this.node, this);
+        } else if (segChanged) {
+            this.scheduleRender();
+            healOversizedDirectorNode(this.node, this);
+        }
     }
 
     clearRunProgress(title, detail) {
@@ -8867,6 +8903,7 @@ class MiniMaxH3DirectorEditor {
         this.runOverallEl.style.width = "0%";
         this.runPhaseEl.style.width = "0%";
         this._runHighlightSeg = -1;
+        this._runProgressSegKey = null;
         this.updateRunSelectUI();
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
@@ -8880,6 +8917,7 @@ class MiniMaxH3DirectorEditor {
         if (this.runOverallEl) this.runOverallEl.style.width = "0%";
         if (this.runPhaseEl) this.runPhaseEl.style.width = "0%";
         this._runHighlightSeg = -1;
+        this._runProgressSegKey = null;
         this.updateRunSelectUI();
         this.scheduleRender();
     }
