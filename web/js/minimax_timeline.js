@@ -1151,6 +1151,71 @@ function stopDomEvent(e) {
     e.stopPropagation();
 }
 
+/** True when focus/target is a Director text field (incl. contenteditable token editor). */
+function directorEditableFromEventTarget(target) {
+    let node = target;
+    if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    if (!node?.closest) return null;
+    if (!node.closest(".mmx-host")) return null;
+    return node.closest("input, textarea, select, [contenteditable='true'], .bd-token-editor");
+}
+
+/**
+ * Stop Comfy graph copy/paste from firing while typing in Director prompts.
+ * contenteditable chips are invisible to Comfy's INPUT/TEXTAREA checks, so Ctrl+V
+ * otherwise pastes the last copied nodes beside the Director.
+ */
+function installDirectorClipboardGuard() {
+    if (typeof document === "undefined" || document.__mmxDirectorClipboardGuard) return;
+    document.__mmxDirectorClipboardGuard = true;
+
+    const blockBubbleToCanvas = (e) => {
+        if (!directorEditableFromEventTarget(e.target)
+            && !directorEditableFromEventTarget(document.activeElement)) {
+            return;
+        }
+        e.stopImmediatePropagation();
+    };
+
+    for (const type of ["paste", "copy", "cut"]) {
+        document.addEventListener(type, blockBubbleToCanvas, true);
+    }
+    document.addEventListener("keydown", (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        const k = e.key?.toLowerCase?.();
+        if (k !== "v" && k !== "c" && k !== "x") return;
+        blockBubbleToCanvas(e);
+    }, true);
+
+    const patchPaste = () => {
+        const canvas = app.canvas;
+        if (!canvas) return;
+        const wrap = (obj, key) => {
+            if (!obj || typeof obj[key] !== "function" || obj[key].__mmxDirectorPatched) return;
+            const orig = obj[key];
+            const patched = function (...args) {
+                if (directorEditableFromEventTarget(document.activeElement)) return null;
+                return orig.apply(this, args);
+            };
+            patched.__mmxDirectorPatched = true;
+            obj[key] = patched;
+        };
+        wrap(canvas, "pasteFromClipboard");
+        wrap(canvas.constructor?.prototype, "pasteFromClipboard");
+        // Some frontend builds expose paste on the LiteGraph canvas proto only.
+        try {
+            const LG = globalThis.LiteGraph?.LGraphCanvas?.prototype;
+            wrap(LG, "pasteFromClipboard");
+        } catch {
+            /* ignore */
+        }
+    };
+    patchPaste();
+    queueMicrotask(patchPaste);
+    setTimeout(patchPaste, 0);
+    setTimeout(patchPaste, 500);
+}
+
 function hideWidget(w) {
     if (!w) return;
     // Group headers in HIDDEN_WIDGETS duplicate timeline panel sections — hide them too.
@@ -9730,6 +9795,7 @@ function normalizeDirectorOutputs(node) {
 app.registerExtension({
     name: "ComfyUI.MiniMaxH3DirectorPlugin",
     async setup() {
+        installDirectorClipboardGuard();
         const flushDirectors = () => {
             const graph = app.graph ?? app.canvas?.graph;
             for (const node of graph?._nodes ?? graph?.nodes ?? []) {

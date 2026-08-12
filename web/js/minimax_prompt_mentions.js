@@ -822,7 +822,10 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
     });
 
     rich.addEventListener("paste", (e) => {
+        // Block Comfy canvas node-paste (clipboard still holds last copied nodes).
         e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation?.();
         const text = (e.clipboardData || window.clipboardData)?.getData("text/plain") || "";
         insertAtCaret(rich, text.replace(/\r\n/g, "\n"), getMedia, chipOpts);
         syncToTextarea({ emitInput: true });
@@ -830,6 +833,10 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
     });
 
     rich.addEventListener("keydown", (e) => {
+        // contenteditable is not INPUT/TEXTAREA — Comfy treats Ctrl+V as graph paste.
+        if ((e.ctrlKey || e.metaKey) && ["v", "c", "x"].includes(e.key?.toLowerCase?.())) {
+            e.stopPropagation();
+        }
         if (!menu?.classList.contains("hidden") && filtered.length) {
             if (e.key === "ArrowDown") {
                 e.preventDefault();
