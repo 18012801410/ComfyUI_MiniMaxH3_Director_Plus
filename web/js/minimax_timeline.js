@@ -13,8 +13,10 @@ import {
     genLayoutHint,
     getDirectorMode,
     imageBatchRequiresFixedOutput,
+    isContinuityMasterEnabled,
     isCustomAspectRatio,
     isPromptBatchTask,
+    isSegmentContinuityFromPrev,
     isVideoBatchTask,
     MAX_GEN_FRAMES,
     MAX_REFERENCE_AUDIOS,
@@ -587,6 +589,8 @@ const STYLES = `
 .bd-panel.bd-rv2v-panel>b,.bd-panel.bd-v2v-panel>b,.bd-seg-head>b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .bd-seg-head{display:flex;align-items:baseline;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
 .bd-seg-head>b{flex-shrink:0;margin:0}
+.bd-seg-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
+.bd-seg-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff}
 .bd-seg-head .bd-meta,.bd-panel.bd-v2v-panel .bd-seg-head .bd-meta,.bd-panel.bd-rv2v-panel .bd-seg-head .bd-meta{color:#8a8a8a;font-size:11px;line-height:1.45;padding:0;min-width:0}
 .bd-prompt-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(110px,38%);gap:8px;align-items:stretch}
 .bd-prompt-layout>.bd-prompt-col{order:1}
@@ -1800,7 +1804,7 @@ class MiniMaxH3DirectorEditor {
                     ...(i2iSrc?.width > 0 ? { sourceWidth: i2iSrc.width, sourceHeight: i2iSrc.height } : {}),
                 },
                 output,
-                segments: this.timeline.segments.map((s) => {
+                segments: this.timeline.segments.map((s, i) => {
                     const clean = sanitizeSegmentForPayload(s);
                     return {
                         id: clean.id,
@@ -1815,6 +1819,8 @@ class MiniMaxH3DirectorEditor {
                         refAudios: clean.refAudios || [],
                         refVideos: clean.refVideos || [],
                         genImage: clean.genImage || { imageFile: "" },
+                        // Persist per-segment「引用上段」(default true when unset).
+                        continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                     };
                 }),
                 ...this._runSelectionPayload(),
@@ -2200,6 +2206,10 @@ class MiniMaxH3DirectorEditor {
             <div class="bd-panel" data-r="segment-panel" style="display:none">
                 <div class="bd-seg-head">
                     <b data-r="seg-label">片段 1</b>
+                    <label class="bd-seg-continuity hidden" data-r="seg-continuity-from-prev-wrap" hidden>
+                        <input type="checkbox" data-r="seg-continuity-from-prev">
+                        <span data-i18n="batch.continuityFromPrev">引用上段</span>
+                    </label>
                     <div class="bd-meta" data-r="seg-info"></div>
                 </div>
                 <div class="bd-prompt-layout" data-r="seg-prompt-layout">
@@ -2330,6 +2340,8 @@ class MiniMaxH3DirectorEditor {
         this.segRefAudiosWrap = this.root.querySelector('[data-r="seg-ref-audios-wrap"]');
         this.segRefAudiosBox = this.root.querySelector('[data-r="seg-ref-audios"]');
         this.segLabel = this.root.querySelector('[data-r="seg-label"]');
+        this.segContinuityFromPrevWrap = this.root.querySelector('[data-r="seg-continuity-from-prev-wrap"]');
+        this.segContinuityFromPrevCb = this.root.querySelector('[data-r="seg-continuity-from-prev"]');
         this.segInfo = this.root.querySelector('[data-r="seg-info"]');
         this.segPrompt = this.root.querySelector('[data-r="seg-prompt"]');
         this.segNegative = this.root.querySelector('[data-r="seg-negative"]');
@@ -2589,6 +2601,18 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.oninput = applyOverlap;
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.segContinuityFromPrevCb) {
+            this.segContinuityFromPrevCb.onchange = () => {
+                const seg = this.timeline.segments?.[this.selectedIndex];
+                if (!seg || this.selectedIndex <= 0) return;
+                seg.continuityFromPrev = !!this.segContinuityFromPrevCb.checked;
+                this.commit(true);
+            };
+            this.segContinuityFromPrevWrap?.setAttribute(
+                "title",
+                t("tooltip.segmentContinuityFromPrev"),
+            );
         }
 
         this.genGlobalImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(true); });
@@ -4756,6 +4780,24 @@ class MiniMaxH3DirectorEditor {
             // Keep DOM aligned with timeline; eligibility only gates visibility.
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
+        this.syncSegmentContinuityFromPrevUI();
+    }
+
+    /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
+    syncSegmentContinuityFromPrevUI() {
+        const wrap = this.segContinuityFromPrevWrap;
+        const cb = this.segContinuityFromPrevCb;
+        if (!wrap || !cb) return;
+        const idx = this.selectedIndex ?? 0;
+        const masterOn = isContinuityEligible(this)
+            && isContinuityMasterEnabled(this.timeline?.output);
+        const show = masterOn && idx > 0 && !this.isImageBatch() && !this.isFl2vMode();
+        wrap.classList.toggle("hidden", !show);
+        wrap.hidden = !show;
+        if (!show) return;
+        const seg = this.timeline.segments?.[idx];
+        cb.checked = isSegmentContinuityFromPrev(seg, idx);
+        wrap.title = t("tooltip.segmentContinuityFromPrev");
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
@@ -4996,6 +5038,11 @@ class MiniMaxH3DirectorEditor {
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
+        // Refresh per-segment「引用上段」checkboxes when master toggle changes.
+        if (key === "continuityEnabled") {
+            if (this.isImageBatch()) this.renderImageBatchGroups?.();
+            this.syncSegmentContinuityFromPrevUI?.();
+        }
         this.commit();
         this.flushTimelineSync();
     }
@@ -7888,6 +7935,7 @@ class MiniMaxH3DirectorEditor {
         const liveSeg = (this._previewSegments || this.timeline.segments)?.[this.selectedIndex] || seg;
         const segKey = resolveTaskKey(liveSeg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
+        this.syncSegmentContinuityFromPrevUI();
         this._updateSegInfoFromSegment(liveSeg);
         this.segPrompt.value = liveSeg.prompt || "";
         if (taskUsesReferenceImages(segKey)) {

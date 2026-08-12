@@ -10,6 +10,8 @@ import {
     durationToMiniMaxFrames,
     framesToDurationSec,
     imageBatchVariant,
+    isContinuityMasterEnabled,
+    isSegmentContinuityFromPrev,
     isVideoBatchTask,
     MAX_GEN_FRAMES,
     MAX_REFERENCE_AUDIOS,
@@ -434,6 +436,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-head b{color:#ccc;font-size:11px}
 .bd-batch-r2v .bd-batch-head b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .bd-batch-run-check{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f;flex-shrink:0}
+.bd-batch-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
+.bd-batch-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff;flex-shrink:0}
+.bd-batch-continuity span{white-space:nowrap}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
@@ -1914,6 +1919,31 @@ export function renderImageBatchGroups(editor) {
         const title = document.createElement("b");
         title.textContent = t(isR2v ? "batch.groupTitle.asset" : "batch.groupTitle.prompt", { n: index + 1 });
         head.appendChild(title);
+        // Per-segment continuity (master「段间引导」must be on; skip segment 1).
+        const masterCont = isContinuityMasterEnabled(editor.timeline?.output);
+        if (masterCont && index > 0 && isVideo) {
+            const contLabel = document.createElement("label");
+            contLabel.className = "bd-batch-continuity";
+            contLabel.title = t("tooltip.segmentContinuityFromPrev");
+            const contCb = document.createElement("input");
+            contCb.type = "checkbox";
+            contCb.className = "bd-batch-continuity-check";
+            contCb.checked = isSegmentContinuityFromPrev(seg, index);
+            contCb.onchange = (e) => {
+                e.stopPropagation();
+                seg.continuityFromPrev = !!contCb.checked;
+                // Flush timeline_data immediately so Queue Prompt cannot race the debounce.
+                editor.commit?.(false, { syncTimeline: true });
+                editor.flushTimelineSync?.();
+            };
+            contCb.onclick = (e) => e.stopPropagation();
+            const contText = document.createElement("span");
+            contText.setAttribute("data-i18n", "batch.continuityFromPrev");
+            contText.textContent = t("batch.continuityFromPrev");
+            contLabel.appendChild(contCb);
+            contLabel.appendChild(contText);
+            head.appendChild(contLabel);
+        }
         const meta = document.createElement("div");
         meta.className = "bd-batch-head-meta";
         if (isVideo) {
