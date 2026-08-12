@@ -978,20 +978,44 @@ function hookTaskTypeWidget(node) {
 }
 
 /**
- * Snap absurdly tall nodes (corruption / old stretch ratchet) back to content size.
- * Does not run on every progress tick — only init / explicit heal.
+ * Only snap *runaway* heights (old infinite-growth corruption).
+ * ideal+1200 was far too aggressive: r2v users routinely drag taller, and init heal
+ * wiped the workflow-saved size on every Comfy restart (#7 regression).
  */
+const DIRECTOR_UI_RUNAWAY_ABS_H = 12000;
+const DIRECTOR_UI_RUNAWAY_EXTRA_H = 8000;
+
 function healOversizedDirectorNode(node, editor) {
     if (!node?.size || !node.computeSize) return false;
     bindDomWidgetContentComputeSize(editor);
     const ideal = node.computeSize()?.[1];
     if (ideal == null) return false;
     const curH = node.size[1] || 0;
-    const maxOk = ideal + DIRECTOR_UI_MAX_EXTRA_H;
-    if (curH <= maxOk) return false;
-    node.setSize([node.size[0], ideal]);
+    const runaway = curH > DIRECTOR_UI_RUNAWAY_ABS_H
+        || curH > ideal + DIRECTOR_UI_RUNAWAY_EXTRA_H;
+    if (!runaway) return false;
+    // Keep a modest stretch so heal does not feel like a hard snap to content min.
+    const safeH = Math.max(ideal, Math.min(curH, ideal + DIRECTOR_UI_MAX_EXTRA_H));
+    node.setSize([node.size[0], safeH]);
     node.setDirtyCanvas?.(true, true);
     return true;
+}
+
+/** After graph load / init: re-fill once LiteGraph assigns computedHeight from saved size. */
+function scheduleDirectorLayoutSettle(editor) {
+    if (!editor) return;
+    const run = () => {
+        if (editor.isPlaying || editor._pauseSettling) return;
+        bindDomWidgetContentComputeSize(editor);
+        // Do not ensure/heal here — preserve workflow size; only re-fill batch panel.
+        syncBatchPanelFillHeight(editor, { settle: true });
+    };
+    requestAnimationFrame(() => {
+        run();
+        requestAnimationFrame(run);
+        setTimeout(run, 80);
+        setTimeout(run, 250);
+    });
 }
 
 /** Grow once when content min increases (mode switch); never shrink; never use stretch. */
@@ -1097,8 +1121,10 @@ function initDirectorEditor(node) {
         node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        // Only clamp true runaway; never steal normal user/workflow height (#7).
         healOversizedDirectorNode(node, node._minimaxEditor);
         syncDirectorNodeSize(node, node._minimaxEditor);
+        scheduleDirectorLayoutSettle(node._minimaxEditor);
         return node._minimaxEditor;
     } catch (err) {
         console.error("[MiniMax H3Director] UI init failed:", err);
@@ -9795,8 +9821,10 @@ app.registerExtension({
         finalizeDirectorWidgetOrder(node);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
-        initDirectorEditor(node);
-        node._minimaxEditor?.scheduleRender?.();
+        const editor = initDirectorEditor(node);
+        editor?.scheduleRender?.();
+        // Workflow size is already on node.size — settle fill after widgets arrange.
+        scheduleDirectorLayoutSettle(editor);
     },
     async getCustomWidgets() {
         return {
