@@ -57,8 +57,9 @@ import {
     setImageBatchPreview,
     setR2vToolbar,
     setToolbarDisabledForBatch,
-    rememberDomWidgetStretchFromNode,
-    seedDomWidgetStretchFromNodeIfNeeded,
+    bindDomWidgetContentComputeSize,
+    contentDomWidgetMinHeight,
+    DIRECTOR_UI_MAX_EXTRA_H,
     syncBatchPanelFillHeight,
     updateR2vToolbarBtns,
     wireBatchRunSelectControls,
@@ -428,17 +429,45 @@ function makeGroupHeaderWidget(inputName, inputData) {
 }
 
 const STYLES = `
-.mmx-host{width:100%;box-sizing:border-box;display:flex;flex-direction:column;min-height:var(--comfy-widget-min-height,0px);height:100%}
-/* Default: height follows content. Batch-fill mode stretches to fill a taller node. */
-.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:var(--comfy-widget-min-height,0px);height:auto;flex:1 1 auto}
-.bd-wrap.bd-batch-fill{height:100%!important;min-height:0!important;flex:1 1 0}
+/* min-height = content only; height:100% fills LiteGraph free space without raising
+   getMinHeight (avoids Vue-node ResizeObserver feedback growth).
+   overflow:hidden keeps run-status from painting past the node bottom edge. */
+.mmx-host{width:100%;box-sizing:border-box;display:flex;flex-direction:column;min-height:var(--comfy-widget-min-height,0px);height:100%;max-height:100%;overflow:hidden}
+/* Default: fill allocated box. Batch-fill mode stretches list into leftover space. */
+.bd-wrap{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e0e0e0;font-size:11px;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;position:relative;min-height:0;height:100%;flex:1 1 auto;overflow:hidden}
+.bd-wrap.bd-batch-fill{height:100%!important;min-height:0!important;max-height:100%;flex:1 1 0;overflow:hidden}
 .bd-main{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;width:100%}
-/* flex-basis:0 so leftover node height goes into main → batch → list (not empty void). */
+/*
+ * Batch is inside .bd-main (sibling of .bd-split which holds 公共参数).
+ * Main grows with the node; .bd-split may shrink/scroll so .bd-batch always keeps space.
+ */
 .bd-wrap.bd-batch-fill .bd-main{flex:1 1 0;min-height:0;overflow:hidden}
-.bd-wrap.bd-batch-fill .bd-batch:not(.hidden){flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.bd-wrap.bd-batch-fill .bd-main>:not(.bd-batch):not(.bd-split){flex:0 0 auto}
+/* 公共参数区：可收缩+内部滚动，避免展开后把素材组挤出视口 */
+.bd-wrap.bd-batch-fill .bd-main>.bd-split{
+  flex:0 1 auto;min-height:0;max-height:42%;overflow:auto;width:100%
+}
+.bd-wrap.bd-batch-fill .bd-main>.bd-batch:not(.hidden){
+  flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column
+}
 .bd-wrap.bd-batch-fill .bd-batch-toolbar,.bd-wrap.bd-batch-fill .bd-batch-i2v-notice{flex-shrink:0}
-.bd-wrap.bd-batch-fill .bd-batch-list{flex:1 1 0;min-height:160px;max-height:none!important;overflow-y:auto;height:auto}
-.bd-wrap.bd-batch-fill .bd-run-status{flex-shrink:0;margin-top:0}
+.bd-wrap.bd-batch-fill .bd-batch-list{
+  flex:1 1 0;min-height:0;max-height:none!important;overflow-y:auto;height:auto;
+  display:flex;flex-direction:column
+}
+.bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0}
+/* Solo material group (class set by syncBatchPanelFillHeight): card fills the list. */
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;align-self:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0;height:auto}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:0}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{flex:1 1 auto;min-height:200px;height:auto!important}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source{align-content:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-prompts,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts{height:100%;min-height:0}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
@@ -484,7 +513,7 @@ const STYLES = `
 .bd-canvas.bd-grab{cursor:grab}
 .bd-canvas.bd-grabbing{cursor:grabbing}
 .bd-output{width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;background:#1e1e1e;border:1px solid #333;border-radius:6px}
-.bd-split{display:block;width:100%;box-sizing:border-box}
+.bd-split{display:block;width:100%;box-sizing:border-box;min-width:0}
 .bd-r2v-common-hint{margin:0 0 8px;font-size:11px;line-height:1.4;color:#9ab;opacity:.95}
 .bd-panel.bd-r2v-common-panel{border:1px solid #3a4a5a;background:linear-gradient(180deg,#1a222c 0%,#151a20 100%)}
 .bd-r2v-common-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}
@@ -627,7 +656,7 @@ const STYLES = `
 .bd-output .bd-out-fixed{display:flex;gap:4px;align-items:center}
 .bd-output .bd-out-fixed.hidden{display:none}
 /* Do not use margin-top:auto — with an oversized min-height it creates a huge empty gap above the status bar. */
-.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:6px;flex-shrink:0}
+.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:6px;margin-bottom:0;flex-shrink:0}
 .bd-run-status.idle .bd-run-title{color:#888}
 .bd-run-status.active .bd-run-title{color:#4fff8f}
 .bd-run-status.done .bd-run-title{color:#7a9cff}
@@ -935,32 +964,40 @@ function hookTaskTypeWidget(node) {
     };
 }
 
-/** Grow node height without treating the change as a user drag (avoids stretch ratchet). */
-function growDirectorNodeHeight(node, editor, nextH) {
-    if (!node?.size || nextH == null) return false;
+/**
+ * Snap absurdly tall nodes (corruption / old stretch ratchet) back to content size.
+ * Does not run on every progress tick — only init / explicit heal.
+ */
+function healOversizedDirectorNode(node, editor) {
+    if (!node?.size || !node.computeSize) return false;
+    bindDomWidgetContentComputeSize(editor);
+    const ideal = node.computeSize()?.[1];
+    if (ideal == null) return false;
     const curH = node.size[1] || 0;
-    if (curH >= nextH - 2) return false;
-    if (editor) {
-        editor._programmaticSizeSync = true;
-        editor._ignoreStretchCaptureUntil = performance.now() + 300;
-    }
-    try {
-        node.setSize([node.size[0], nextH]);
-        node.setDirtyCanvas?.(true, true);
-    } finally {
-        if (editor) editor._programmaticSizeSync = false;
-    }
+    const maxOk = ideal + DIRECTOR_UI_MAX_EXTRA_H;
+    if (curH <= maxOk) return false;
+    node.setSize([node.size[0], ideal]);
+    node.setDirtyCanvas?.(true, true);
+    return true;
+}
+
+/** Grow once when content min increases (mode switch); never shrink; never use stretch. */
+function ensureDirectorNodeFitsContent(node, editor) {
+    if (!node?.size || !node.computeSize) return false;
+    bindDomWidgetContentComputeSize(editor);
+    const ideal = node.computeSize()?.[1];
+    if (ideal == null) return false;
+    if ((node.size[1] || 0) >= ideal - 2) return false;
+    node.setSize([node.size[0], ideal]);
+    node.setDirtyCanvas?.(true, true);
     return true;
 }
 
 function syncDirectorNodeSize(node, editor) {
     if (editor?.isPlaying) return;
-    if (!node?.computeSize) return;
-    if (editor) editor.updateDomWidgetHeight?.();
-    const sz = node.computeSize();
-    // Grow for content (e.g. run progress bar); never shrink a user-resized node
-    // — otherwise Queue/progress sync snaps height back to content minimum (#7).
-    growDirectorNodeHeight(node, editor, sz?.[1]);
+    // Update CSS/content min. Avoid stretch bookkeeping + Vue RO feedback loops.
+    // User-dragged height is preserved by never shrinking (#7).
+    editor?.updateDomWidgetHeight?.();
 }
 
 function ensureDirectorDomWidgetWidth(node) {
@@ -1008,17 +1045,29 @@ function finalizeDirectorWidgetOrder(node) {
 }
 
 function bindDirectorDomWidgetSizing(node, widget, getEditor) {
+    const editor = getEditor?.();
     const minHeight = () => getDirectorUiHeight(getEditor?.());
-    widget.computeSize = (width) => [width, minHeight()];
+    // Do not set computeSize — fixed-size widgets never receive resize free space.
+    try {
+        delete widget.computeSize;
+    } catch {
+        widget.computeSize = undefined;
+    }
     widget.computeLayoutSize = () => ({
         minHeight: minHeight(),
+        maxHeight: undefined,
         minWidth: DIRECTOR_MIN_WIDTH,
     });
     if (widget.options) {
         widget.options.getMinHeight = minHeight;
+        delete widget.options.getMaxHeight;
     }
     const el = widget.element;
-    if (el) el.style.minHeight = `${minHeight()}px`;
+    if (el) {
+        el.style.minHeight = `${minHeight()}px`;
+        el.style.setProperty("--comfy-widget-min-height", `${minHeight()}px`);
+    }
+    if (editor) bindDomWidgetContentComputeSize(editor);
 }
 
 function initDirectorEditor(node) {
@@ -1032,7 +1081,7 @@ function initDirectorEditor(node) {
         node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
-        seedDomWidgetStretchFromNodeIfNeeded(node._minimaxEditor);
+        healOversizedDirectorNode(node, node._minimaxEditor);
         syncDirectorNodeSize(node, node._minimaxEditor);
         return node._minimaxEditor;
     } catch (err) {
@@ -1668,25 +1717,15 @@ class MiniMaxH3DirectorEditor {
     }
 
     updateDomWidgetHeight() {
-        const h = getDirectorUiHeight(this);
+        const h = contentDomWidgetMinHeight(this) || getDirectorUiHeight(this);
         this.container?.style.setProperty("--comfy-widget-min-height", `${h}px`);
         if (this.container) this.container.style.minHeight = `${h}px`;
-        if (this.domWidget) {
-            // Prefer user-stretched height when the node is taller than content min.
-            this.domWidget.computeSize = (width) => {
-                const stretch = this._domWidgetStretchH || 0;
-                return [width, Math.max(h, stretch)];
-            };
-            if (this.domWidget.options) {
-                this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
-            }
-        }
-        // Grow node when content needs more room; do NOT shrink a user-enlarged node
-        // (batch list fills the extra height via syncBatchPanelFillHeight).
-        if (this.node?.computeSize && !this.isPlaying) {
-            const sz = this.node.computeSize();
-            growDirectorNodeHeight(this.node, this, sz?.[1]);
-        }
+        // Content min only — never bake node.size / stretch into computeSize.
+        bindDomWidgetContentComputeSize(this);
+        // Grow only when content needs more room (e.g. mode switch). Never shrink
+        // a user-enlarged node (#7). Ideal height is content-based, so this cannot
+        // ratchet the way stretch-from-node.size did.
+        if (!this.isPlaying) ensureDirectorNodeFitsContent(this.node, this);
         syncBatchPanelFillHeight(this);
     }
 
@@ -6059,11 +6098,13 @@ class MiniMaxH3DirectorEditor {
 
     onNodeResize() {
         if (this.isPlaying || this._pauseSettling) return;
-        // Only user drags should persist stretch; programmatic grow (progress) skips.
-        rememberDomWidgetStretchFromNode(this);
+        // Growable layout (no computeSize) → LiteGraph puts free space into computedHeight.
+        bindDomWidgetContentComputeSize(this);
         this._resetLayoutStyles();
         this.applyZoomWidth();
         syncBatchPanelFillHeight(this);
+        // Re-fill after LiteGraph finishes arranging widgets for the new node size.
+        requestAnimationFrame(() => syncBatchPanelFillHeight(this));
         this.scheduleSettleRender();
     }
 

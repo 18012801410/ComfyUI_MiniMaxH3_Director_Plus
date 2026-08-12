@@ -348,18 +348,41 @@ function refreshTokenStates(editor, getMedia) {
     }
 }
 
-function serializedCaretOffset(editor) {
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount || !editor.contains(sel.anchorNode)) {
+/** Serialized prompt offset for a DOM boundary inside the token editor. */
+function serializedBoundaryOffset(editor, container, offset) {
+    if (!editor || !container || !editor.contains(container)) {
         return serializeTokenEditor(editor).length;
     }
-    const range = sel.getRangeAt(0).cloneRange();
-    const pre = range.cloneRange();
+    const pre = document.createRange();
     pre.selectNodeContents(editor);
-    pre.setEnd(range.startContainer, range.startOffset);
+    try {
+        pre.setEnd(container, offset);
+    } catch {
+        return serializeTokenEditor(editor).length;
+    }
     const walkerRoot = document.createElement("div");
     walkerRoot.appendChild(pre.cloneContents());
     return serializeTokenEditor(walkerRoot).length;
+}
+
+/** Selection [start, end) in serialized prompt space (end === start when collapsed). */
+function serializedSelectionOffsets(editor) {
+    const sel = window.getSelection();
+    const len = serializeTokenEditor(editor).length;
+    if (!sel || !sel.rangeCount || !editor.contains(sel.anchorNode)) {
+        return { start: len, end: len };
+    }
+    const range = sel.getRangeAt(0);
+    let start = serializedBoundaryOffset(editor, range.startContainer, range.startOffset);
+    let end = sel.isCollapsed
+        ? start
+        : serializedBoundaryOffset(editor, range.endContainer, range.endOffset);
+    if (end < start) [start, end] = [end, start];
+    return { start, end };
+}
+
+function serializedCaretOffset(editor) {
+    return serializedSelectionOffsets(editor).start;
 }
 
 function setCaretBySerializedOffset(editor, offset) {
@@ -431,15 +454,18 @@ function setCaretBySerializedOffset(editor, offset) {
 }
 
 function textBeforeCaret(editor) {
-    const offset = serializedCaretOffset(editor);
+    const { start: offset } = serializedSelectionOffsets(editor);
     const full = serializeTokenEditor(editor);
     return { full, offset, before: full.slice(0, offset), after: full.slice(offset) };
 }
 
 function insertAtCaret(editor, insertText, getMedia, options, { replaceFrom = null } = {}) {
-    const { offset, full } = textBeforeCaret(editor);
-    const start = replaceFrom != null ? replaceFrom : offset;
-    const next = full.slice(0, start) + insertText + full.slice(offset);
+    const { start: selStart, end: selEnd } = serializedSelectionOffsets(editor);
+    const full = serializeTokenEditor(editor);
+    // Replace the active selection (or @-query range). Previously paste only
+    // inserted at selStart and kept the selected text → duplicate prompts (#8).
+    const start = replaceFrom != null ? replaceFrom : selStart;
+    const next = full.slice(0, start) + insertText + full.slice(selEnd);
     const caret = start + insertText.length;
     hydrateTokenEditor(editor, next, getMedia, options);
     setCaretBySerializedOffset(editor, caret);
