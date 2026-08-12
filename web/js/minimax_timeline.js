@@ -3706,6 +3706,9 @@ class MiniMaxH3DirectorEditor {
         } else if (isBatch) {
             this.timeline.editMode = "segment";
             this.renderImageBatchGroups();
+            // Must refresh globalPanel display — r2v common params stay display:none
+            // if we only ran updateModeUI in the non-batch branch (segment → r2v).
+            this.updateModeUI();
             if (isR2v) {
                 this.updateSelectionUI();
                 this._syncR2vCardSelection();
