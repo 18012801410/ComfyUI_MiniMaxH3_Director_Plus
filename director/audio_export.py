@@ -60,6 +60,49 @@ def empty_audio_dict(sample_rate: int = SILENT_SAMPLE_RATE) -> dict[str, Any]:
     return {"waveform": torch.zeros(1, 1, 0), "sample_rate": int(sample_rate)}
 
 
+def prepare_segment_audio_for_file_export(
+    plan,
+    seg,
+    *,
+    audio_dict: dict[str, Any] | None,
+    frame_count: int,
+) -> dict[str, Any] | None:
+    """Return AUDIO to mux into a per-segment mp4, or None for video-only.
+
+    Matches timeline ``audioMode``: mute → None; generate prefers model audio
+    (source extract fallback when the task allows); source extracts timeline audio.
+    """
+    mode = resolve_audio_mode(plan)
+    if mode == AUDIO_MODE_MUTE:
+        return None
+
+    fps = float(getattr(plan, "frame_rate", 24) or 24)
+    n_frames = max(0, int(frame_count))
+    if n_frames <= 0:
+        return None
+
+    if mode == AUDIO_MODE_GENERATE and _audio_has_samples(audio_dict):
+        sr = int(audio_dict.get("sample_rate") or SILENT_SAMPLE_RATE)
+        return _pad_or_trim_audio_to_frames(
+            audio_dict, frame_count=n_frames, fps=fps, sample_rate=sr
+        )
+
+    # source mode, or generate with empty model audio on tasks that can pass source.
+    if mode == AUDIO_MODE_SOURCE or (
+        mode == AUDIO_MODE_GENERATE and task_passes_source_audio(str(getattr(plan, "global_task_key", "") or ""))
+    ):
+        timeline = getattr(plan, "raw", None) or {}
+        start = int(getattr(seg, "start_frame", 0) or 0)
+        end = int(getattr(seg, "end_frame", start + n_frames) or (start + n_frames))
+        extracted = extract_timeline_audio(timeline, start, end, fps)
+        if _audio_has_samples(extracted):
+            sr = int(extracted.get("sample_rate") or SILENT_SAMPLE_RATE)
+            return _pad_or_trim_audio_to_frames(
+                extracted, frame_count=n_frames, fps=fps, sample_rate=sr
+            )
+    return None
+
+
 def _coerce_audio_output(audio: dict[str, Any] | None, *, sample_rate: int) -> dict[str, Any]:
     if audio is None:
         return empty_audio_dict(sample_rate)

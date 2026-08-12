@@ -1,7 +1,7 @@
 # Source-video decode for v2v / timeline loading
 opencv-python-headless>=4.8
 
-# Source-audio extract for v2v/rv2v「使用原声」
+# Source-audio extract + incremental segment mp4 encode (「分段导出」边生成边保存)
 imageio-ffmpeg>=0.4
 
 # Smart shot split (智能分割)

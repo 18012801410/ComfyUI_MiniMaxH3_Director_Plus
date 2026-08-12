@@ -54,6 +54,7 @@ from .segment_cache import (
     load_segment_handoff_meta,
     save_segment_cache,
 )
+from .segment_mp4_export import maybe_export_segment_mp4, new_segment_mp4_run_dir
 from .segment_continuity import (
     concat_continuous_chunks,
     is_continuity_active,
@@ -246,6 +247,10 @@ def execute_director_plan_core(
     segment_audios: list[dict[str, Any]] = []
     skipped_no_cache: list[int] = []
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
+    # One timestamp folder per execute so all segments of this run stay together.
+    mp4_run_dir = new_segment_mp4_run_dir(plan)
+    if mp4_run_dir is not None:
+        reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if clear_vram_between_segments:
         reports.append("VRAM: 段间清理显存已开启。")
     if audio_mode == AUDIO_MODE_MUTE:
@@ -585,6 +590,18 @@ def execute_director_plan_core(
                             audio=completed_audios.get(prev_idx),
                             replace_audio=False,
                         )
+                        # Rewrite incremental mp4 so mid-run files match trimmed length.
+                        mp4_path = maybe_export_segment_mp4(
+                            mp4_run_dir,
+                            plan,
+                            prev_seg,
+                            prev_chunk,
+                            completed_audios.get(prev_idx),
+                        )
+                        if mp4_path:
+                            reports.append(
+                                f"Segment {prev_idx + 1}: mp4 updated after continuity trim → {mp4_path}"
+                            )
                     trimmed_prev_export = int(prev_export_trim)
                     log.info(
                         "Director continuity: trimmed %df from seg #%d export "
@@ -720,6 +737,19 @@ def execute_director_plan_core(
             audio=audio_dict if isinstance(audio_dict, dict) else None,
         )
         completed_outputs[seg.index] = chunk
+
+        #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
+        mp4_path = maybe_export_segment_mp4(
+            mp4_run_dir,
+            plan,
+            seg,
+            chunk,
+            audio_dict if isinstance(audio_dict, dict) else None,
+        )
+        if mp4_path:
+            reports.append(
+                f"Segment {ui_idx + 1}/{timeline_seg_total}: mp4 saved → {mp4_path}"
+            )
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
             try:
