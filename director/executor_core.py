@@ -11,6 +11,8 @@ from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_e
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
 from .core_sampling import sample_single_stage
+from .refine_pack import refine_will_sample
+from .refine_sampling import apply_segment_refine
 from .frame_align import minimax_align_frame_count, pad_or_trim_frames
 from .audio_export import (
     AUDIO_MODE_GENERATE,
@@ -54,7 +56,7 @@ from .segment_cache import (
     load_segment_handoff_meta,
     save_segment_cache,
 )
-from .segment_mp4_export import maybe_export_segment_mp4, new_segment_mp4_run_dir
+from .segment_mp4_export import maybe_export_segment_mp4s, new_segment_mp4_run_dir
 from .segment_continuity import (
     concat_continuous_chunks,
     is_continuity_active,
@@ -92,6 +94,34 @@ def _decode_av_latent(samples, vae, audio_vae, *, decode_audio: bool = True):
     audio_out = VAEDecodeAudio.execute(audio_vae, audio_latent)
     audio = _unpack_node_output(audio_out)[0]
     return images, audio
+
+
+def _trim_decoded_to_export(
+    decoded: torch.Tensor,
+    audio_dict: dict[str, Any] | None,
+    *,
+    trim_frames: int,
+    export_len: int,
+    plan: DirectorPlan,
+) -> tuple[torch.Tensor, dict[str, Any] | None]:
+    """Drop motion-context prefix and crop to the UI export length."""
+    if trim_frames > 0:
+        decoded, audio_dict = trim_context_prefix(
+            decoded,
+            audio_dict,
+            trim_frames,
+            fps=float(plan.frame_rate or 24),
+            match_tail=True,
+        )
+    if decoded.shape[0] > export_len:
+        decoded = decoded[:export_len]
+        if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None:
+            sr = int(audio_dict.get("sample_rate") or 32000)
+            want = int(round((export_len / float(plan.frame_rate or 24)) * sr))
+            wf = audio_dict["waveform"]
+            if int(wf.shape[-1]) > want:
+                audio_dict = {"waveform": wf[..., :want], "sample_rate": sr}
+    return decoded, audio_dict
 
 
 def _ref_tensor_from_seg_refs(refs, index: int) -> torch.Tensor | None:
@@ -216,7 +246,15 @@ def execute_director_plan_core(
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
-) -> tuple[torch.Tensor, list[torch.Tensor], list[dict[str, Any]], str]:
+) -> tuple[
+    torch.Tensor,
+    list[torch.Tensor],
+    list[dict[str, Any]],
+    str,
+    list[int],
+    torch.Tensor,
+    list[torch.Tensor],
+]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
@@ -242,8 +280,10 @@ def execute_director_plan_core(
     timeline_seg_total = max(timeline_seg_total, len(all_segments))
 
     output_chunks: list[torch.Tensor] = []
+    output_pre_chunks: list[torch.Tensor] = []
     output_segments: list = []  # plans aligned 1:1 with output_chunks (skips omitted)
     segment_outputs: list[torch.Tensor] = []
+    segment_pre_refine: list[torch.Tensor] = []
     segment_audios: list[dict[str, Any]] = []
     skipped_no_cache: list[int] = []
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
@@ -305,11 +345,14 @@ def execute_director_plan_core(
         )
 
     completed_outputs: dict[int, torch.Tensor] = {}
+    completed_pre_refine: dict[int, torch.Tensor] = {}
     completed_av_latents: dict[int, dict] = {}
     completed_av_handoff: dict[int, dict] = {}
     completed_audios: dict[int, dict] = {}
 
-    def _run_one_segment(seg, *, progress_index: int) -> tuple[torch.Tensor, dict[str, Any] | None]:
+    def _run_one_segment(
+        seg, *, progress_index: int
+    ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor]:
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
@@ -528,7 +571,9 @@ def execute_director_plan_core(
                 context_length=context_n,
                 context_latent=prev_av,
                 context_frames=prev_tail,
-                context_audio=prev_audio if prev_av is None else None,
+                # Always pass export audio so a canvas-mismatch fallback
+                # (Refine upscale) can still pin audio from the decoded tail.
+                context_audio=prev_audio,
                 audio_vae=audio_vae,
                 continue_audio=pin_audio,
                 # t2v/i2v/r2v/v2v/rv2v: context owns the head.
@@ -587,6 +632,21 @@ def execute_director_plan_core(
                             if getattr(oseg, "index", -1) == prev_idx:
                                 output_chunks[oi] = prev_chunk
                                 break
+                    prev_pre = completed_pre_refine.get(prev_idx)
+                    if prev_pre is not None:
+                        if int(prev_pre.shape[0]) > prev_export_trim:
+                            prev_pre, _ = trim_export_tail(
+                                prev_pre, None, prev_export_trim, fps=fps
+                            )
+                        completed_pre_refine[prev_idx] = prev_pre
+                        if run_pos is not None and run_pos < len(segment_pre_refine):
+                            segment_pre_refine[run_pos] = prev_pre
+                        if plan.export_mode == "all":
+                            for oi, oseg in enumerate(output_segments):
+                                if getattr(oseg, "index", -1) == prev_idx:
+                                    if oi < len(output_pre_chunks):
+                                        output_pre_chunks[oi] = prev_pre
+                                    break
                     # Persist trimmed export so partial re-runs reload the same A/V lengths.
                     # replace_audio=False: do not unlink audio.pt when only video was hydrated.
                     prev_seg = next(
@@ -608,14 +668,15 @@ def execute_director_plan_core(
                             replace_audio=False,
                         )
                         # Rewrite incremental mp4 so mid-run files match trimmed length.
-                        mp4_path = maybe_export_segment_mp4(
+                        mp4_paths = maybe_export_segment_mp4s(
                             mp4_run_dir,
                             plan,
                             prev_seg,
                             prev_chunk,
                             completed_audios.get(prev_idx),
+                            pre_frames=completed_pre_refine.get(prev_idx),
                         )
-                        if mp4_path:
+                        for mp4_path in mp4_paths:
                             reports.append(
                                 f"Segment {prev_idx + 1}: mp4 updated after continuity trim → {mp4_path}"
                             )
@@ -699,6 +760,63 @@ def execute_director_plan_core(
             preview_every=1,
         )
 
+        first_pass_gpu = None
+        pre_export = None
+        will_refine = refine_will_sample(plan, seg)
+        if will_refine:
+            try:
+                report_director_progress(
+                    node_id, segment_index=progress_index, segment_total=seg_total,
+                    phase="decode", phase_value=0, phase_max=1, **meta,
+                )
+                first_pass_gpu, _ = _decode_av_latent(
+                    samples, vae, audio_vae, decode_audio=False,
+                )
+                pre_export = first_pass_gpu.detach().cpu().float()
+            except Exception as exc:
+                log.warning(
+                    "Segment %s first-pass decode for images_pre_refine failed (%s).",
+                    ui_idx + 1,
+                    exc,
+                )
+                first_pass_gpu = None
+                pre_export = None
+
+        pack = getattr(plan, "refine", None)
+        upscale_frames = (
+            first_pass_gpu
+            if isinstance(pack, dict) and (pack.get("mode") or "") == "upscale"
+            else None
+        )
+        if first_pass_gpu is not None and upscale_frames is None:
+            del first_pass_gpu
+            first_pass_gpu = None
+        samples, refine_note = apply_segment_refine(
+            plan,
+            seg,
+            samples=samples,
+            model=model,
+            vae=vae,
+            audio_vae=audio_vae,
+            positive=positive,
+            negative=negative,
+            seed=seed,
+            cfg=cfg,
+            first_steps=steps,
+            sampler_name=sampler,
+            scheduler=scheduler,
+            shift_video=shift_video,
+            shift_audio=shift_audio,
+            on_phase=_report_sample_phase,
+            on_step_preview=_report_step_preview if live_tae_preview else None,
+            first_pass_images=upscale_frames,
+            trim_frames=trim_frames,
+        )
+        del upscale_frames
+        if first_pass_gpu is not None:
+            del first_pass_gpu
+            first_pass_gpu = None
+
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=0, phase_max=1, **meta,
@@ -706,33 +824,34 @@ def execute_director_plan_core(
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
-        if trim_frames > 0:
-            decoded, audio_dict = trim_context_prefix(
-                decoded,
-                audio_dict,
-                trim_frames,
-                fps=float(plan.frame_rate or 24),
-                match_tail=True,
-            )
+        # Keep exactly the UI segment length. With motion context, sample is
+        # longer (visible+ctx, 17k+5 aligned); after trim, crop to num_frames.
+        # Next segment must pin at export end (trim+export), not sample end.
+        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        decoded, audio_dict = _trim_decoded_to_export(
+            decoded,
+            audio_dict,
+            trim_frames=trim_frames,
+            export_len=export_len,
+            plan=plan,
+        )
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=1, phase_max=1, **meta,
         )
 
-        # Keep exactly the UI segment length. With motion context, sample is
-        # longer (visible+ctx, 17k+5 aligned); after trim, crop to num_frames.
-        # Next segment must pin at export end (trim+export), not sample end.
-        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
-        if decoded.shape[0] > export_len:
-            decoded = decoded[:export_len]
-            if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None:
-                sr = int(audio_dict.get("sample_rate") or 32000)
-                want = int(round((export_len / float(plan.frame_rate or 24)) * sr))
-                wf = audio_dict["waveform"]
-                if int(wf.shape[-1]) > want:
-                    audio_dict = {"waveform": wf[..., :want], "sample_rate": sr}
-
         chunk = decoded.cpu().float()
+        if pre_export is not None:
+            pre_export, _ = _trim_decoded_to_export(
+                pre_export,
+                None,
+                trim_frames=trim_frames,
+                export_len=export_len,
+                plan=plan,
+            )
+            pre_chunk = pre_export.cpu().float()
+        else:
+            pre_chunk = chunk
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(chunk.shape[0]),
@@ -754,18 +873,22 @@ def execute_director_plan_core(
             audio=audio_dict if isinstance(audio_dict, dict) else None,
         )
         completed_outputs[seg.index] = chunk
+        completed_pre_refine[seg.index] = pre_chunk
 
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
-        mp4_path = maybe_export_segment_mp4(
+        # Final clip = 二采; distinct pre_chunk = 一采 (seg_XXXX_pre.mp4).
+        mp4_paths = maybe_export_segment_mp4s(
             mp4_run_dir,
             plan,
             seg,
             chunk,
             audio_dict if isinstance(audio_dict, dict) else None,
+            pre_frames=pre_chunk,
         )
-        if mp4_path:
+        for mp4_path in mp4_paths:
+            kind = "一采 mp4" if str(mp4_path).endswith("_pre.mp4") else "mp4"
             reports.append(
-                f"Segment {ui_idx + 1}/{timeline_seg_total}: mp4 saved → {mp4_path}"
+                f"Segment {ui_idx + 1}/{timeline_seg_total}: {kind} saved → {mp4_path}"
             )
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
@@ -792,23 +915,28 @@ def execute_director_plan_core(
 
         reports.append(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
-            f"({target_len} frames, seed={seed})"
+            f"({target_len} frames, seed={seed}"
+            f"{', ' + refine_note if refine_note else ''})"
         )
         log.info(
             "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
-        return chunk, audio_dict
+        return chunk, audio_dict, pre_chunk
 
     for seg in all_segments:
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
-            chunk, audio_dict = _run_one_segment(seg, progress_index=progress_pos[seg.index])
+            chunk, audio_dict, pre_chunk = _run_one_segment(
+                seg, progress_index=progress_pos[seg.index]
+            )
             segment_outputs.append(chunk)
+            segment_pre_refine.append(pre_chunk)
             segment_audios.append(audio_dict or {})
             if plan.export_mode == "all":
                 output_chunks.append(chunk)
+                output_pre_chunks.append(pre_chunk)
                 output_segments.append(seg)
             continue
 
@@ -824,6 +952,7 @@ def execute_director_plan_core(
         if cached is not None:
             cached = cached.float()
             completed_outputs[seg.index] = cached
+            completed_pre_refine[seg.index] = cached
             cached_audio = load_segment_audio(
                 node_id, seg, plan, allow_stale=used_stale
             )
@@ -847,6 +976,7 @@ def execute_director_plan_core(
                 f"({cached.shape[0]} frames{audio_note}{stale_note})"
             )
             output_chunks.append(cached)
+            output_pre_chunks.append(cached)
             output_segments.append(seg)
             continue
 
@@ -861,12 +991,14 @@ def execute_director_plan_core(
             )
             continue
         completed_outputs[seg.index] = fill
+        completed_pre_refine[seg.index] = fill
         passthrough_indices.append(seg.index)
         reports.append(
             f"Segment {seg.index + 1}/{len(all_segments)}: source passthrough "
             f"({fill.shape[0]} frames, not sampled — outside run selection)"
         )
         output_chunks.append(fill)
+        output_pre_chunks.append(fill)
         output_segments.append(seg)
 
     if passthrough_indices:
@@ -887,6 +1019,7 @@ def execute_director_plan_core(
 
     report_director_finish(node_id, seg_total)
     export_chunks = output_chunks if output_chunks else segment_outputs
+    export_pre_chunks = output_pre_chunks if output_pre_chunks else segment_pre_refine
     export_segments = (
         output_segments
         if output_chunks
@@ -898,6 +1031,9 @@ def execute_director_plan_core(
         patched = completed_outputs.get(seg.index)
         if patched is not None:
             export_chunks[i] = patched
+        patched_pre = completed_pre_refine.get(seg.index)
+        if patched_pre is not None and i < len(export_pre_chunks):
+            export_pre_chunks[i] = patched_pre
     # Aligned to export_chunks only (skipped slots are already omitted).
     export_audios: list[dict[str, Any]] = []
     missing_audio: list[int] = []
@@ -925,4 +1061,24 @@ def execute_director_plan_core(
         ]
         export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
     combined = concat_continuous_chunks(export_chunks, export_segments, plan)
-    return combined, segment_outputs, segment_audios, "\n".join(reports), export_frame_counts
+    pre_source = export_pre_chunks if export_pre_chunks else segment_pre_refine
+    if not pre_source:
+        pre_source = list(segment_outputs)
+    same_as_final = (
+        len(pre_source) == len(export_chunks)
+        and all(a is b for a, b in zip(pre_source, export_chunks))
+    )
+    pre_combined = (
+        combined
+        if same_as_final
+        else concat_continuous_chunks(pre_source, export_segments, plan)
+    )
+    return (
+        combined,
+        segment_outputs,
+        segment_audios,
+        "\n".join(reports),
+        export_frame_counts,
+        pre_combined,
+        segment_pre_refine,
+    )

@@ -328,7 +328,27 @@ function applyBatchSegmentDuration(editor, index, rawSec) {
 }
 
 /**
- * Pull prompt textareas into timeline.segments by card index.
+ * Resolve a live segment from a batch card control.
+ * Prefer segment id — after splice/reorder, DOM indices no longer match the array.
+ */
+function liveBatchSegmentFromEl(editor, el, indexAttr) {
+    const segs = editor?.timeline?.segments;
+    if (!el || !Array.isArray(segs) || !segs.length) return null;
+    const id = el.getAttribute("data-batch-seg-id");
+    if (id) {
+        const index = segs.findIndex((s) => s?.id && s.id === id);
+        if (index >= 0) return { seg: segs[index], index };
+        return null;
+    }
+    const index = parseInt(el.getAttribute(indexAttr), 10);
+    if (!Number.isFinite(index) || index < 0 || index >= segs.length) return null;
+    const nCards = editor.batchList?.querySelectorAll(".bd-batch-card")?.length ?? 0;
+    if (nCards !== segs.length) return null;
+    return { seg: segs[index], index };
+}
+
+/**
+ * Pull prompt textareas into timeline.segments.
  * Must run before normalize / re-render / timeline sync — otherwise edits sit on
  * stale segment objects (or only in the DOM) and get wiped.
  */
@@ -339,12 +359,10 @@ export function flushBatchPromptInputs(editor) {
     if (!Array.isArray(segs) || !segs.length) return;
     list.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
         el.__bdTokenApi?.sync?.();
-        const index = parseInt(el.getAttribute("data-batch-prompt-index"), 10);
-        if (!Number.isFinite(index) || index < 0 || index >= segs.length) return;
-        const live = segs[index];
-        if (!live) return;
-        live.prompt = el.value || "";
-        live.negativePrompt = live.negativePrompt ?? "";
+        const live = liveBatchSegmentFromEl(editor, el, "data-batch-prompt-index");
+        if (!live?.seg) return;
+        live.seg.prompt = el.value || "";
+        live.seg.negativePrompt = live.seg.negativePrompt ?? "";
     });
 }
 
@@ -357,20 +375,19 @@ function flushBatchDurationInputs(editor) {
     const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     if (!isVideoBatchTask(taskKey)) return;
     for (const input of list.querySelectorAll("input[data-batch-sec-index]")) {
-        const index = parseInt(input.getAttribute("data-batch-sec-index"), 10);
-        if (!Number.isFinite(index)) continue;
+        const live = liveBatchSegmentFromEl(editor, input, "data-batch-sec-index");
+        if (!live?.seg) continue;
         clearTimeout(input._t);
         input._t = null;
         const displayed = parseFloat(input.value);
         if (!Number.isFinite(displayed)) continue;
-        const seg = editor.timeline.segments?.[index];
-        const current = Number(seg?.durationSec);
+        const current = Number(live.seg.durationSec);
         // Skip if already in sync (avoid churn while typing the same committed value).
-        if (seg && Number.isFinite(current) && roundDurationSec(displayed) === roundDurationSec(current)
+        if (Number.isFinite(current) && roundDurationSec(displayed) === roundDurationSec(current)
             && input !== document.activeElement) {
             continue;
         }
-        applyBatchSegmentDuration(editor, index, displayed);
+        applyBatchSegmentDuration(editor, live.index, displayed);
     }
 }
 
@@ -828,6 +845,9 @@ export function addImageBatchGroup(editor) {
 export function deleteImageBatchGroup(editor, index) {
     if (editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.()) return;
     if (editor.timeline.segments.length <= 1) return;
+    // Persist drafts while DOM still matches the current array, then splice.
+    flushBatchPromptInputs(editor);
+    flushBatchDurationInputs(editor);
     editor.timeline.segments.splice(index, 1);
     normalizeImageBatchSegments(editor);
     editor.selectedIndex = clamp(
@@ -1956,7 +1976,7 @@ export function renderImageBatchGroups(editor) {
             seg.frameCount = frames;
             seg.length = frames;
             seg._videoFrameCount = frames;
-            secRow.innerHTML = `${t("batch.seconds")} <input type="number" data-batch-sec-index="${index}" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames, play: playSec })}">`;
+            secRow.innerHTML = `${t("batch.seconds")} <input type="number" data-batch-sec-index="${index}" data-batch-seg-id="${seg.id || ""}" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames, play: playSec })}">`;
             const secInput = secRow.querySelector("input");
             const applySec = () => {
                 const updated = applyBatchSegmentDuration(editor, index, secInput.value);
@@ -2000,7 +2020,11 @@ export function renderImageBatchGroups(editor) {
             del.className = "bd-batch-del";
             del.textContent = t("batch.delete");
             del.disabled = editor.timeline.segments.length <= 1;
-            del.onclick = (e) => { e.stopPropagation(); deleteImageBatchGroup(editor, index); };
+            del.onclick = (e) => {
+                e.stopPropagation();
+                const liveIdx = (editor.timeline.segments || []).findIndex((s) => s?.id && s.id === seg.id);
+                deleteImageBatchGroup(editor, liveIdx >= 0 ? liveIdx : index);
+            };
             meta.appendChild(del);
         }
         head.appendChild(meta);
@@ -2050,7 +2074,7 @@ export function renderImageBatchGroups(editor) {
         const ph = t(isR2v ? "placeholder.batchR2v" : "placeholder.batchDefault");
         prompts.innerHTML = `
             <span class="bd-label">${t("batch.prompt")}</span>
-            <textarea data-f="prompt" data-batch-prompt-index="${index}" placeholder=""></textarea>`;
+            <textarea data-f="prompt" data-batch-prompt-index="${index}" data-batch-seg-id="${seg.id || ""}" placeholder=""></textarea>`;
         prompts.querySelector("textarea").placeholder = ph;
         prompts.querySelector("textarea").value = seg.prompt || "";
         const promptEl = prompts.querySelector('[data-f="prompt"]');

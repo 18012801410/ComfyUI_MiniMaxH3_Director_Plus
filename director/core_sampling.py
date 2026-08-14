@@ -37,6 +37,8 @@ def sample_single_stage(
     on_phase: PhaseCallback | None = None,
     on_step_preview: StepPreviewCallback | None = None,
     preview_every: int = 1,
+    denoise: float = 1.0,
+    phase_name: str = "sample",
 ):
     import comfy.sample
     import comfy.utils
@@ -47,7 +49,7 @@ def sample_single_stage(
         if on_phase:
             on_phase(phase, value)
 
-    notify("sample", 0)
+    notify(phase_name, 0)
     shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
     model_shifted = _unpack_node_output(shifted)[0]
 
@@ -92,7 +94,7 @@ def sample_single_stage(
         positive,
         neg,
         latent_image,
-        denoise=1.0,
+        denoise=float(max(0.0, min(1.0, denoise))),
         noise_mask=noise_mask,
         callback=callback,
         disable_pbar=disable_pbar,
@@ -102,5 +104,5 @@ def sample_single_stage(
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
-    notify("sample", 1)
+    notify(phase_name, 1)
     return out

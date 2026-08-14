@@ -23,14 +23,15 @@
 | **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
 | **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
+| **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再低 denoise 二采。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
 
 ### 输入 / 输出
 
 **输入：** `model` → `video_vae` → `audio_vae` → `clip`  
-**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）
+**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）/ `refine`（`MiniMax H3 Director Refine`）
 
-**输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
+**输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
 
 > CLIP Loader 的 **type 必须选 `minimax`**（Qwen3-VL）。  
 > `t2v` / `i2v` / `fl2v` 用 **fl2va** UNET；`r2v` / `v2v` / `rv2v` 用 **ref2va** UNET。
@@ -39,7 +40,8 @@
 
 请将 **ComfyUI** 升级到 **v0.30.0** 及以上（含官方 MiniMax H3 节点：[PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224)、[PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)）。
 
-可选：`scenedetect`（智能分割）、`opencv-python-headless`（源视频解码）、`imageio-ffmpeg`（原声抽取）——见 `requirements.txt`。
+可选：`scenedetect`（智能分割）、`opencv-python-headless`（源视频解码）、`imageio-ffmpeg`（原声抽取）——见 `requirements.txt`。  
+Refine 的 `nvidia_rtx_vsr` 另需 NVIDIA GPU，可 `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com`（不是硬依赖）。
 
 ## 安装
 
@@ -85,6 +87,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 | `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | 源视频 + 参考图/音频 |
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group×2 → Combine → `i2v_groups` |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group×N → Combine → `r2v_groups` |
+| `minimax_h3_director_refine.json` | r2v | **ref2va** | 外接 Refine 二采；`images` 与 `images_pre_refine` 各出一路成片 |
 
 ### 推荐模型文件
 
@@ -130,6 +133,17 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 1. 选 **v2v** 或 **rv2v**，上传源视频并分段（切分 / 均分 / 智能分割）
 2. 每段写提示词；系统自动将源片段绑定为 `<Video 1>`
 3. `rv2v` 可额外上传参考图 / 参考音频；声音模式可选生成 / 原声 / 静音
+
+### 二采 / 放大 Refine 用法摘要
+
+1. 添加 **MiniMax H3 Director Refine**，把 `refine` 接到导演台 `refine` 口。不接则仍是原来的一采
+2. `mode=refine`：同分辨率再采一遍（精修）。`mode=upscale`：先放大到目标画布再二采；分辨率控件仅在 `upscale` 时显示（可跟随导演台、按比例+百万像素，或自定义宽高）
+3. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
+4. `denoise` 常用 0.2–0.35，越大改动越大。`steps=0` 时约为一采步数的 40%
+5. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
+6. `upscale` 的放大方式：`lanczos`（可另接 `UPSCALE_MODEL`，如 RealESRGAN）；`nvidia_rtx_vsr` 用 RTX Video Super Resolution（不接放大模型）
+
+示例：`example_workflows/minimax_h3_director_refine.json`
 
 ### 外部多组接线（第三方节点接入）
 

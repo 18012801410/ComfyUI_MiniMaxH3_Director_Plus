@@ -52,7 +52,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         or seg.reference_video_meta.get("fileName")
         or ""
     ).strip()
-    return {
+    fp = {
         "index": seg.index,
         "start": seg.start_frame,
         "end": seg.end_frame,
@@ -75,6 +75,10 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         # Bump CONTINUITY_PIPELINE_ID when sampling/handoff semantics change.
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }
+    from .refine_pack import refine_fingerprint
+
+    fp.update(refine_fingerprint(plan))
+    return fp
 
 
 def _safe_unlink(path: Path) -> bool:

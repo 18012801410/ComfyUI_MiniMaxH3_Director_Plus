@@ -326,19 +326,37 @@ def apply_motion_context(
     height = int(video.shape[3]) * 16
     frame_count = pixel_frames_for_latent_t(int(video.shape[2]))
 
+    pin_audio_latent = context_latent
     if context_latent is not None:
         src = video_from_latent(context_latent)
         src_w, src_h = int(src.shape[4]) * 16, int(src.shape[3]) * 16
-        if src_w != width or src_h != height:
+        if src_w == width and src_h == height:
+            available = pixel_frames_for_latent_t(int(src.shape[2]))
+            if context_end_frame is not None:
+                available = min(available, max(0, int(context_end_frame)))
+            video_src = "latent"
+        elif context_frames is not None and int(context_frames.shape[0]) >= 1:
+            # Refine upscale stores a larger AV latent; next segment's first pass
+            # is still the Director canvas. Pin from the decoded export instead
+            # of crashing — that export is what concat actually uses.
+            log.warning(
+                "Director continuity: context latent is %dx%d but this segment "
+                "is %dx%d — pin from decoded frames (typical after Refine upscale).",
+                src_w,
+                src_h,
+                width,
+                height,
+            )
+            context_end_frame = None
+            pin_audio_latent = None
+            available = int(context_frames.shape[0])
+            video_src = "pixels"
+        else:
             raise ValueError(
                 f"Director continuity: context latent is {src_w}x{src_h} but this "
                 f"segment is {width}x{height}. Regenerate the previous segment at "
-                "this resolution."
+                "this resolution, or keep a decoded export for pixel pin."
             )
-        available = pixel_frames_for_latent_t(int(src.shape[2]))
-        if context_end_frame is not None:
-            available = min(available, max(0, int(context_end_frame)))
-        video_src = "latent"
     else:
         if context_frames is None or int(context_frames.shape[0]) < 1:
             raise ValueError(
@@ -416,14 +434,14 @@ def apply_motion_context(
     }
     out = node_helpers.conditioning_set_values(positive, values)
 
-    if continue_audio and (context_latent is not None or context_audio is not None):
+    if continue_audio and (pin_audio_latent is not None or context_audio is not None):
         # Official: audio window independent; 0 follows video span. Example WF uses 24.
         a_frames = int(audio_ctx) if audio_ctx > 0 else int(span)
         # Align audio pin end with the video pin window (not export overshoot).
         audio_end_limit = pin_end_px if pin_end_px is not None else context_end_frame
-        if context_latent is not None:
+        if pin_audio_latent is not None:
             audio_latent, ref_audio_t, overhang = _audio_tail_from_latent(
-                context_latent, a_frames, end_frame=audio_end_limit
+                pin_audio_latent, a_frames, end_frame=audio_end_limit
             )
         else:
             if audio_vae is None:

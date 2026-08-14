@@ -1,7 +1,11 @@
 """Incremental per-segment MP4 export for「分段导出」runs.
 
 Best-effort: encode failures must never abort generation. Each run uses a
-timestamp folder: ``output/minimax_seg_export/<YYYYMMDD_HHMMSS>/seg_XXXX.mp4``.
+timestamp folder: ``output/minimax_seg_export/<YYYYMMDD_HHMMSS>/``.
+
+Files:
+  ``seg_XXXX.mp4`` — final clip (二采 / no Refine)
+  ``seg_XXXX_pre.mp4`` — first pass (一采), only when Refine ran
 """
 
 from __future__ import annotations
@@ -49,8 +53,19 @@ def new_segment_mp4_run_dir(plan: DirectorPlan) -> Path | None:
         return None
 
 
-def segment_mp4_path(run_dir: Path, seg: SegmentPlan) -> Path:
-    return Path(run_dir) / f"seg_{int(seg.index):04d}.mp4"
+def segment_mp4_path(run_dir: Path, seg: SegmentPlan, *, suffix: str = "") -> Path:
+    tag = f"_{suffix}" if suffix else ""
+    return Path(run_dir) / f"seg_{int(seg.index):04d}{tag}.mp4"
+
+
+def _pre_frames_distinct(pre_frames, frames) -> bool:
+    if pre_frames is None or frames is None:
+        return False
+    if pre_frames is frames:
+        return False
+    if not isinstance(pre_frames, torch.Tensor) or pre_frames.ndim != 4:
+        return False
+    return int(pre_frames.shape[0]) > 0
 
 
 def maybe_export_segment_mp4(
@@ -59,8 +74,12 @@ def maybe_export_segment_mp4(
     seg: SegmentPlan,
     frames: torch.Tensor,
     audio_dict: dict[str, Any] | None = None,
+    *,
+    suffix: str = "",
 ) -> str | None:
     """Write one segment mp4 into ``run_dir``. Never raises.
+
+    ``suffix="pre"`` writes the first-pass clip (``seg_XXXX_pre.mp4``).
 
     Returns the absolute path string on success, otherwise None.
     """
@@ -72,7 +91,7 @@ def maybe_export_segment_mp4(
     if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
         return None
 
-    dest = segment_mp4_path(run_dir, seg)
+    dest = segment_mp4_path(run_dir, seg, suffix=suffix)
 
     try:
         from ..lib.video_export import write_frames_to_mp4
@@ -90,15 +109,42 @@ def maybe_export_segment_mp4(
             audio=audio,
         )
         log.info(
-            "MiniMax H3 Director segment #%d mp4 saved: %s",
+            "MiniMax H3 Director segment #%d %smp4 saved: %s",
             int(seg.index) + 1,
+            "first-pass " if suffix == "pre" else "",
             path,
         )
         return str(path)
     except Exception as exc:
         log.warning(
-            "Segment #%d mp4 export failed (generation continues): %s",
+            "Segment #%d %smp4 export failed (generation continues): %s",
             int(seg.index) + 1,
+            "first-pass " if suffix == "pre" else "",
             exc,
         )
         return None
+
+
+def maybe_export_segment_mp4s(
+    run_dir: Path | None,
+    plan: DirectorPlan,
+    seg: SegmentPlan,
+    frames: torch.Tensor,
+    audio_dict: dict[str, Any] | None = None,
+    *,
+    pre_frames: torch.Tensor | None = None,
+) -> list[str]:
+    """Write final clip, plus first-pass when Refine produced a distinct tensor."""
+    paths: list[str] = []
+    final_path = maybe_export_segment_mp4(
+        run_dir, plan, seg, frames, audio_dict,
+    )
+    if final_path:
+        paths.append(final_path)
+    if _pre_frames_distinct(pre_frames, frames):
+        pre_path = maybe_export_segment_mp4(
+            run_dir, plan, seg, pre_frames, audio_dict, suffix="pre",
+        )
+        if pre_path:
+            paths.append(pre_path)
+    return paths

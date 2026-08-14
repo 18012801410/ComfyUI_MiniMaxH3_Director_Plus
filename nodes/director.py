@@ -90,6 +90,17 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                "refine": (
+                    "MMX_DIR_REFINE",
+                    {
+                        "tooltip": (
+                            "Optional Refine node. When connected, each segment runs a second "
+                            "sample pass (same-size refine, or upscale then sample). "
+                            "images is the refined result; images_pre_refine is the first pass. "
+                            "Unconnected = single-pass (current behavior)."
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
@@ -142,9 +153,9 @@ class MiniMaxH3Director:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING")
-    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
+    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
@@ -152,7 +163,9 @@ class MiniMaxH3Director:
         "single-stage KSampler + MiniMaxH3SigmaShift, LTXVSeparateAVLatent decode. "
         "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
         "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
-        "(external priority over UI cards). Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
+        "(external priority over UI cards). Optional refine accepts MiniMax H3 Director Refine "
+        "(second sample / upscale). images_pre_refine is the first-pass video before refine. "
+        "Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
     )
 
     def execute(
@@ -172,6 +185,7 @@ class MiniMaxH3Director:
         unique_id=None,
         i2v_groups=None,
         r2v_groups=None,
+        refine=None,
         steps=25,
         sampler="res_multistep",
         scheduler="simple",
@@ -197,9 +211,10 @@ class MiniMaxH3Director:
             unique_id=unique_id,
             i2v_groups=i2v_groups,
             r2v_groups=r2v_groups,
+            refine=refine,
         )
 
-        combined, segment_outputs, segment_audios, report, export_frame_counts = (
+        combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments = (
             execute_director_plan_core(
                 plan,
                 node_id=unique_id,
@@ -226,4 +241,6 @@ class MiniMaxH3Director:
             export_source_images=export_source_images,
             segment_audios=segment_audios,
             segment_frame_counts=export_frame_counts,
+            pre_refine_combined=pre_combined,
+            pre_refine_segments=pre_segments,
         )

@@ -6,3 +6,7 @@ imageio-ffmpeg>=0.4
 
 # Smart shot split (智能分割)
 scenedetect>=0.6.4,<0.8
+
+# Optional: Refine upscale_method=nvidia_rtx_vsr (NVIDIA RTX GPU only).
+# Do not add as a hard dep — AMD / cloud / no-VSR installs would break.
+# pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com

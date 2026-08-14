@@ -11,6 +11,7 @@
 | `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | 参考改视频；源视频 + 图片1–9 |
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group（Image to Video）→ Combine → Director.`i2v_groups`；时长/素材以接线为准 |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group（Reference to Video）→ Combine → Director.`r2v_groups`；可用「选择运行」勾选组序 |
+| `minimax_h3_director_refine.json` | r2v | **ref2va** | 外接 **MiniMax H3 Director Refine** → Director.`refine`。`images` 为二采后成片，`images_pre_refine` 为一采对比片 |
 
 ## 模型路径（与官方模板一致）
 
@@ -33,3 +34,12 @@ CLIP Loader 的 **type 必须选 `minimax`**。
 ## 输出
 
 导演台 → `CreateVideo` → `SaveVideo`（前缀 `video/MiniMaxH3_Director_*`），报告接 `PreviewAny`。
+
+Refine 示例另把 `images_pre_refine` 接到第二路 `CreateVideo` / `SaveVideo`，方便和二采后成片对比。未接 Refine 时该口与 `images` 相同。
+
+## Refine 二采
+
+- 不接 Refine 节点 = 原来的单次采样
+- `mode=refine`：同分辨率精修；`mode=upscale`：放大到目标画布再低 denoise 二采
+- 可选接 `UPSCALE_MODEL`（仅 `upscale` + `lanczos`）；或把 `upscale_method` 设为 `nvidia_rtx_vsr`
+- fl2v 默认跳过二采；关掉 `skip_fl2v` 才会采首尾帧镜头

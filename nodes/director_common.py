@@ -163,6 +163,7 @@ def prepare_director_plan(
     unique_id: str | None,
     i2v_groups=None,
     r2v_groups=None,
+    refine=None,
 ):
     from ..director.external_groups import (
         build_plan_from_external_groups,
@@ -204,6 +205,7 @@ def prepare_director_plan(
             height=height,
             ref_max_size=ref_max_size,
         )
+        plan = _attach_refine(plan, refine)
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
             family,
@@ -229,7 +231,19 @@ def prepare_director_plan(
         height=height,
         ref_max_size=ref_max_size,
     )
+    plan = _attach_refine(plan, refine)
     log.info(plan_summary(plan).replace("\n", " | "))
+    return plan
+
+
+def _attach_refine(plan, refine):
+    from ..director.refine_pack import normalize_refine_pack
+
+    plan.refine = normalize_refine_pack(
+        refine,
+        base_width=int(getattr(plan, "width", 0) or 0),
+        base_height=int(getattr(plan, "height", 0) or 0),
+    )
     return plan
 
 
@@ -296,6 +310,23 @@ def _ensure_nonempty_image_batches(images_out: list[torch.Tensor], *, label: str
     return fixed
 
 
+def _layout_image_batches(
+    plan,
+    combined,
+    segment_outputs,
+    *,
+    export_segments: bool,
+    is_batch: bool,
+    video_batch: bool,
+) -> tuple[list[torch.Tensor], int]:
+    if export_segments or (is_batch and not video_batch):
+        images_out = segment_outputs
+        frame_count = sum(int(s.shape[0]) for s in segment_outputs)
+        return images_out, frame_count
+    combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
+    return [combined], int(combined.shape[0])
+
+
 def finalize_director_outputs(
     plan,
     combined,
@@ -305,34 +336,65 @@ def finalize_director_outputs(
     export_source_images: bool = False,
     segment_audios: list | None = None,
     segment_frame_counts: list[int] | None = None,
+    pre_refine_combined=None,
+    pre_refine_segments: list | None = None,
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
     video_batch = is_video_batch_task_key(plan.global_task_key)
+    split_layout = export_segments or (is_batch and not video_batch)
 
-    if export_segments or (is_batch and not video_batch):
-        images_out = segment_outputs
-        frame_count = sum(int(s.shape[0]) for s in segment_outputs)
-        if export_segments and len(segment_outputs) > 1:
-            report = (
-                report
-                + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output."
-            )
-        if plan.run_indices is not None:
-            report = (
-                report
-                + f"\n\nPartial run: output contains {len(segment_outputs)} re-generated clip(s) only."
-            )
-    else:
-        combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
-        images_out = [combined]
-        frame_count = int(combined.shape[0])
+    images_out, frame_count = _layout_image_batches(
+        plan,
+        combined,
+        segment_outputs,
+        export_segments=export_segments,
+        is_batch=is_batch,
+        video_batch=video_batch,
+    )
+    if export_segments and len(segment_outputs) > 1:
+        report = (
+            report
+            + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output."
+        )
+    if plan.run_indices is not None and split_layout:
+        report = (
+            report
+            + f"\n\nPartial run: output contains {len(segment_outputs)} re-generated clip(s) only."
+        )
+    if not split_layout:
         if video_batch and is_batch and len(segment_outputs) > 1:
             report = report + f"\n\nExport mode: all — merged {frame_count} frame(s) on images output."
         if plan.run_indices is not None and video_batch:
             report = report + f"\n\nPartial run: re-generated {len(segment_outputs)} video group(s)."
 
-    split_for_audio = export_segments or (is_batch and not video_batch)
+    pre_segs = pre_refine_segments if pre_refine_segments else segment_outputs
+    pre_comb = pre_refine_combined if pre_refine_combined is not None else combined
+    share_pre = pre_comb is combined and (
+        pre_segs is segment_outputs
+        or (
+            len(pre_segs) == len(segment_outputs)
+            and all(a is b for a, b in zip(pre_segs, segment_outputs))
+        )
+    )
+    if share_pre:
+        pre_refine_out = images_out
+    else:
+        try:
+            pre_refine_out, _ = _layout_image_batches(
+                plan,
+                pre_comb,
+                pre_segs,
+                export_segments=export_segments,
+                is_batch=is_batch,
+                video_batch=video_batch,
+            )
+        except Exception as exc:
+            log.warning("images_pre_refine layout failed: %s", exc)
+            pre_refine_out = images_out
+            report = report + f"\n\nimages_pre_refine: fallback to images ({exc})."
+
+    split_for_audio = split_layout
     audio_frame_end = frame_count if not split_for_audio else None
     audio_mode = resolve_audio_mode(plan)
     use_generated = audio_mode == AUDIO_MODE_GENERATE
@@ -375,8 +437,20 @@ def finalize_director_outputs(
 
     images_out = _ensure_nonempty_image_batches(images_out, label="images")
     source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images")
+    pre_refine_out = _ensure_nonempty_image_batches(pre_refine_out, label="images_pre_refine")
+
+    refine_pack = getattr(plan, "refine", None)
+    if isinstance(refine_pack, dict) and refine_pack.get("enabled"):
+        report = report + (
+            "\n\nimages_pre_refine: first-pass video (before second sample / upscale). "
+            "Cached or passthrough slots reuse the stored final frames."
+        )
+    else:
+        report = report + (
+            "\n\nimages_pre_refine: same as images (Refine node not connected)."
+        )
 
     report = report + "\n\n有问题联系作者：AI搅拌手  QQ交流群：551482703"
 
     fps_out = float(plan.frame_rate or 24.0)
-    return images_out, audio_out, fps_out, frame_count, source_images_out, report
+    return images_out, audio_out, fps_out, frame_count, source_images_out, report, pre_refine_out
