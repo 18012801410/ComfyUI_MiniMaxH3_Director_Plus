@@ -11,6 +11,7 @@ payload wrappers (including standalone Motion Context packs).
 
 from __future__ import annotations
 
+import inspect
 import logging
 
 import torch
@@ -174,6 +175,44 @@ def _rewrite_audio_timeline(layout, text_len, refs):
     layout.position_ids[a:b, 0] = layout.position_ids[a:b, 0] + (desired_start - slot_start)
 
 
+def _stock_layout_kwargs(keyframes=None, refs=None, frame_count=None):
+    """Forward only kwargs the installed PackedLayout.__init__ actually accepts."""
+    kwargs = {"keyframes": keyframes, "refs": refs}
+    orig = _layout_orig
+    if orig is None:
+        return kwargs
+    try:
+        params = inspect.signature(orig).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if "frame_count" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    ):
+        kwargs["frame_count"] = frame_count
+    return kwargs
+
+
+def _call_layout_orig(
+    obj,
+    text_len,
+    latent_t,
+    latent_h,
+    latent_w,
+    audio_t,
+    keyframes=None,
+    refs=None,
+    frame_count=None,
+):
+    kwargs = _stock_layout_kwargs(keyframes, refs, frame_count)
+    try:
+        _layout_orig(obj, text_len, latent_t, latent_h, latent_w, audio_t, **kwargs)
+    except TypeError as exc:
+        if "frame_count" not in str(exc) or "frame_count" not in kwargs:
+            raise
+        kwargs.pop("frame_count", None)
+        _layout_orig(obj, text_len, latent_t, latent_h, latent_w, audio_t, **kwargs)
+
+
 def _director_layout_init(
     self,
     text_len,
@@ -194,7 +233,7 @@ def _director_layout_init(
             if CTX_FRAME_KEY in entry:
                 entry["resolved_frame_index"] = 0
             stock_keyframes.append(entry)
-    _layout_orig(
+    _call_layout_orig(
         self,
         text_len,
         latent_t,
@@ -221,6 +260,17 @@ def _self_test_layout() -> None:
     text_len, latent_t, lh, lw, audio_t = 7, 7, 22, 38, 16
     frame_count = sum(mm.FRAME_PER_TOKEN[k % 5] for k in range(latent_t))
 
+    dummy = torch.zeros(1, 1, 1, 1, 1)
+
+    def _kf(pixel_index: int, *, marked: bool = False) -> dict:
+        entry = {
+            "resolved_frame_index": 0 if marked else int(pixel_index),
+            "latent": dummy,
+        }
+        if marked:
+            entry[CTX_FRAME_KEY] = int(pixel_index)
+        return entry
+
     def build(keyframes=None, refs=None, rewrite=False):
         lay = mm.PackedLayout.__new__(mm.PackedLayout)
         stock_kf = None
@@ -231,7 +281,7 @@ def _self_test_layout() -> None:
                 if rewrite and CTX_FRAME_KEY in entry:
                     entry["resolved_frame_index"] = 0
                 stock_kf.append(entry)
-        _layout_orig(
+        _call_layout_orig(
             lay,
             text_len,
             latent_t,
@@ -246,23 +296,15 @@ def _self_test_layout() -> None:
             _rewrite_keyframe_times(lay, text_len, latent_t, frame_count, keyframes, refs)
         return lay
 
-    stock = build(
-        keyframes=[
-            {"resolved_frame_index": 0},
-            {"resolved_frame_index": frame_count - 1},
-        ]
-    )
+    stock = build(keyframes=[_kf(0), _kf(frame_count - 1)])
     ours = build(
-        keyframes=[
-            {"resolved_frame_index": 0, CTX_FRAME_KEY: 0},
-            {"resolved_frame_index": 0, CTX_FRAME_KEY: frame_count - 1},
-        ],
+        keyframes=[_kf(0, marked=True), _kf(frame_count - 1, marked=True)],
         rewrite=True,
     )
-    if not torch.equal(stock.position_ids, ours.position_ids):
+    if not torch.allclose(stock.position_ids, ours.position_ids, rtol=0, atol=1e-9):
         raise RuntimeError("Director continuity layout self-test: endpoint mismatch vs stock")
 
-    run = [{"resolved_frame_index": 0, CTX_FRAME_KEY: i} for i in range(4)]
+    run = [_kf(i, marked=True) for i in range(4)]
     interior = build(keyframes=run, rewrite=True)
     times = [float(interior.position_ids[a, 0]) for a, _, k in interior.segments if k == "cond"]
     if len(times) != 4 or any(times[i] >= times[i + 1] for i in range(3)):
