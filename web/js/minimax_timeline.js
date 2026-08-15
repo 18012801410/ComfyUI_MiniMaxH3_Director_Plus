@@ -8896,6 +8896,24 @@ class MiniMaxH3DirectorEditor {
         }
     }
 
+    /** Keep timeline / 素材组 selection on the segment the run is currently on. */
+    _followRunSelection(timelineSeg1Based) {
+        const segs = this.timeline?.segments || [];
+        if (!segs.length) return;
+        const idx = clamp(Math.round(Number(timelineSeg1Based) || 1) - 1, 0, segs.length - 1);
+        if (this.selectedIndex === idx) return;
+        this.selectedIndex = idx;
+        this.updateSelectionUI();
+        const seg = segs[idx];
+        if (seg && Number.isFinite(seg.start) && !this.isPlaying) {
+            const f = Math.max(0, Math.round(Number(seg.start) || 0));
+            this.currentFrame = f;
+            if (this.seekBar) this.seekBar.value = f;
+            this._syncStagePreview?.(f, { force: true });
+        }
+        this.scheduleRender();
+    }
+
     setRunProgress(detail) {
         if (!this.runStatusEl) return;
         const timelineTotal = this.timeline?.segments?.length || 0;
@@ -8929,6 +8947,7 @@ class MiniMaxH3DirectorEditor {
             this.runPhaseEl.style.width = "100%";
             this._runHighlightSeg = -1;
             this._runProgressSegKey = null;
+            this._followRunSelection(timelineSeg);
             this.updateRunSelectUI();
             if (this.isImageBatch()) this.renderImageBatchGroups();
             else this.scheduleRender();
@@ -8940,6 +8959,7 @@ class MiniMaxH3DirectorEditor {
         // under the title in the same green accent and reads as a layout glitch.
         this.runSelectBar?.classList.add("hidden");
         this._runHighlightSeg = timelineSeg - 1;
+        this._followRunSelection(timelineSeg);
         let title;
         if (detail.phase === "plan") {
             title = runTotal > 1 ? t("run.titlePlanning", { n: runTotal, phase: phaseLabel }) : phaseLabel;
