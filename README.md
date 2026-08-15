@@ -23,7 +23,7 @@
 | **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
 | **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
-| **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再低 denoise 二采。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
+| **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再低 denoise 二采。`passes` 可多次精修（upscale 只放大一次）。可选接 `refine_model` 换二采 UNET。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
 
 ### 输入 / 输出
@@ -138,10 +138,13 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 
 1. 添加 **MiniMax H3 Director Refine**，把 `refine` 接到导演台 `refine` 口。不接则仍是原来的一采
 2. `mode=refine`：同分辨率再采一遍（精修）。`mode=upscale`：先放大到目标画布再二采；分辨率控件仅在 `upscale` 时显示（可跟随导演台、按比例+百万像素，或自定义宽高）
-3. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
-4. `denoise` 常用 0.2–0.35，越大改动越大。`steps=0` 时约为一采步数的 40%
-5. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
-6. `upscale` 的放大方式：`lanczos`（可另接 `UPSCALE_MODEL`，如 RealESRGAN）；`nvidia_rtx_vsr` 用 RTX Video Super Resolution（不接放大模型）
+3. `passes`：精修次数，默认 1、最多 9999。`upscale` 只在第 1 次放大，后面都是同分辨率精修
+4. 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型。适合一采挂 Turbo LoRA、二采卸掉或换另一套
+5. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
+6. `denoise` 常用 0.2–0.35，越大改动越大。`steps=0` 时约为一采步数的 40%
+7. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
+8. `upscale` 的放大方式：`lanczos`（可另接 `UPSCALE_MODEL`，如 RealESRGAN）；`nvidia_rtx_vsr` 用 RTX Video Super Resolution（不接放大模型）
+9. 「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`；「全部导出」只出一采和终稿
 
 示例：`example_workflows/minimax_h3_director_refine.json`
 

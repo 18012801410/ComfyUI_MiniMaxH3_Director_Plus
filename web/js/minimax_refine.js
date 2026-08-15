@@ -102,12 +102,25 @@ function moveWidgetAfter(node, name, afterName) {
     widgets.splice(insertAt, 0, widget);
 }
 
+function looksLikeAspectChoice(value) {
+    const v = String(value ?? "").trim();
+    return ASPECT_CHOICES.has(v) || v === FOLLOW_DIRECTOR_ASPECT || v === "Follow Director";
+}
+
+function clampPasses(value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n) || n < 1) return 1;
+    return Math.min(9999, n);
+}
+
 function migrateRefineWidgetOrder(node) {
-    // Old array: mode, denoise, steps, seed_mode, aspect, mp, width, height, skip_fl2v, upscale_method
-    // New array: mode, upscale_method, denoise, steps, seed_mode, aspect, mp, width, height, skip_fl2v
+    // A: mode, denoise, steps, seed, aspect, mp, width, height, skip, method
+    // B: mode, method, denoise, steps, seed, aspect, mp, width, height, skip
+    // C: mode, method, denoise, steps, passes, seed, aspect, mp, width, height, skip
     const methodW = widgetByName(node, "upscale_method");
     const denoiseW = widgetByName(node, "denoise");
     const stepsW = widgetByName(node, "steps");
+    const passesW = widgetByName(node, "passes");
     const seedW = widgetByName(node, "seed_mode");
     const aspectW = widgetByName(node, "aspect_ratio");
     const mpW = widgetByName(node, "megapixels");
@@ -115,34 +128,96 @@ function migrateRefineWidgetOrder(node) {
     const heightW = widgetByName(node, "height");
     const skipW = widgetByName(node, "skip_fl2v");
     if (!methodW || !denoiseW || !stepsW || !skipW) return;
-    if (looksLikeUpscaleMethod(widgetValue(methodW))) return;
-    const shifted =
-        looksLikeNumber(widgetValue(methodW)) &&
-        (looksLikeSeedMode(widgetValue(stepsW)) || looksLikeUpscaleMethod(widgetValue(skipW)));
-    if (!shifted) return;
-    const denoise = widgetValue(methodW);
-    const steps = widgetValue(denoiseW);
-    const seed = widgetValue(stepsW);
-    const aspect = seedW ? widgetValue(seedW) : undefined;
-    const mp = aspectW ? widgetValue(aspectW) : undefined;
-    const width = mpW ? widgetValue(mpW) : undefined;
-    const height = widthW ? widgetValue(widthW) : undefined;
-    const skip = heightW ? widgetValue(heightW) : undefined;
-    const method = widgetValue(skipW);
-    methodW.value = looksLikeUpscaleMethod(method) ? method : "lanczos";
-    denoiseW.value = Number(denoise);
-    stepsW.value = Number(steps);
-    if (seedW) seedW.value = looksLikeSeedMode(seed) ? seed : "inherit";
-    if (aspectW && aspect !== undefined) aspectW.value = aspect;
-    if (mpW && mp !== undefined) mpW.value = mp;
-    if (widthW && width !== undefined) widthW.value = width;
-    if (heightW && height !== undefined) heightW.value = height;
-    if (skip === true || skip === false) skipW.value = skip;
+
+    const methodV = widgetValue(methodW);
+    const denoiseV = widgetValue(denoiseW);
+    const stepsV = widgetValue(stepsW);
+    const passesV = passesW ? widgetValue(passesW) : undefined;
+    const seedV = seedW ? widgetValue(seedW) : undefined;
+    const aspectV = aspectW ? widgetValue(aspectW) : undefined;
+    const mpV = mpW ? widgetValue(mpW) : undefined;
+    const widthV = widthW ? widgetValue(widthW) : undefined;
+    const heightV = heightW ? widgetValue(heightW) : undefined;
+    const skipV = widgetValue(skipW);
+
+    const apply = (vals) => {
+        methodW.value = looksLikeUpscaleMethod(vals.method) ? vals.method : "lanczos";
+        denoiseW.value = Number(vals.denoise);
+        stepsW.value = Number(vals.steps);
+        if (passesW) passesW.value = clampPasses(vals.passes);
+        if (seedW) seedW.value = looksLikeSeedMode(vals.seed) ? vals.seed : "inherit";
+        if (aspectW && vals.aspect !== undefined) aspectW.value = vals.aspect;
+        if (mpW && vals.mp !== undefined) mpW.value = vals.mp;
+        if (widthW && vals.width !== undefined) widthW.value = vals.width;
+        if (heightW && vals.height !== undefined) heightW.value = vals.height;
+        if (vals.skip === true || vals.skip === false) skipW.value = vals.skip;
+    };
+
+    if (looksLikeUpscaleMethod(methodV)) {
+        // B → C: passes slot received seed_mode
+        if (passesW && looksLikeSeedMode(passesV)) {
+            apply({
+                method: methodV,
+                denoise: denoiseV,
+                steps: stepsV,
+                passes: 1,
+                seed: passesV,
+                aspect: seedV,
+                mp: aspectV,
+                width: mpV,
+                height: widthV,
+                skip: heightV,
+            });
+        } else if (passesW) {
+            passesW.value = clampPasses(passesV);
+        }
+        return;
+    }
+
+    const shiftedA =
+        looksLikeNumber(methodV) &&
+        (looksLikeSeedMode(stepsV) || looksLikeUpscaleMethod(skipV) || looksLikeUpscaleMethod(heightV));
+    if (!shiftedA) {
+        if (passesW) passesW.value = clampPasses(passesV);
+        return;
+    }
+
+    if (passesW && looksLikeAspectChoice(passesV)) {
+        // A save loaded onto C widgets (aspect landed on passes)
+        apply({
+            method: heightV,
+            denoise: methodV,
+            steps: denoiseV,
+            passes: 1,
+            seed: stepsV,
+            aspect: passesV,
+            mp: seedV,
+            width: aspectV,
+            height: mpV,
+            skip: widthV,
+        });
+        return;
+    }
+
+    // A save loaded onto B widgets (no passes yet / passes still default)
+    apply({
+        method: skipV,
+        denoise: methodV,
+        steps: denoiseV,
+        passes: 1,
+        seed: stepsV,
+        aspect: seedV,
+        mp: aspectV,
+        width: mpV,
+        height: widthV,
+        skip: heightV,
+    });
 }
 
 function migrateRefineWidgets(node) {
     migrateRefineWidgetOrder(node);
     moveWidgetAfter(node, "upscale_method", "mode");
+    moveWidgetAfter(node, "passes", "steps");
     const aspectW = widgetByName(node, "aspect_ratio");
     const mpW = widgetByName(node, "megapixels");
     const widthW = widgetByName(node, "width");

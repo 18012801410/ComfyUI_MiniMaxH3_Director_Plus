@@ -24,7 +24,7 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 | **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
 | **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
-| **Refine / upscale** | Wire **MiniMax H3 Director Refine** into Director `refine`. Unconnected = original single-pass sampling. `refine` = same-resolution second sample; `upscale` = enlarge to a target canvas then low-denoise sample. `images` is the refined clip; `images_pre_refine` is the first pass (before upscale) |
+| **Refine / upscale** | Wire **MiniMax H3 Director Refine** into Director `refine`. Unconnected = original single-pass sampling. `refine` = same-resolution second sample; `upscale` = enlarge to a target canvas then low-denoise sample. `passes` repeats refine (upscale once). Optional `refine_model` swaps the second-pass UNET. `images` is the refined clip; `images_pre_refine` is the first pass (before upscale) |
 | **Run report** | `report` output with plan and per-segment summary |
 
 ### Inputs / outputs
@@ -139,10 +139,13 @@ This repo ships examples under `example_workflows/`:
 
 1. Add **MiniMax H3 Director Refine** and wire `refine` into Director `refine`. Leave it unconnected for the original single pass
 2. `mode=refine`: same-resolution second sample. `mode=upscale`: enlarge to a target canvas then second-sample; resolution widgets appear only in `upscale` (follow Director, aspect + megapixels, or custom W×H)
-3. Director `images` is the refined clip; `images_pre_refine` is the first pass before upscale (for A/B). `source_images` is still the timeline source, not the first-pass generate
-4. `denoise` is typically 0.2–0.35 (higher = more change). `steps=0` uses about 40% of the first-pass step count
-5. fl2v skips refine by default (protects pinned first/last frames); turn off `skip_fl2v` on Refine to include those shots
-6. Upscale methods: `lanczos` (optional `UPSCALE_MODEL`, e.g. RealESRGAN); `nvidia_rtx_vsr` uses RTX Video Super Resolution (no upscale model)
+3. `passes`: refine rounds, default 1, max 9999. In `upscale` mode only the first round enlarges; later rounds stay on that canvas
+4. Optional `refine_model` (second-pass UNET); unwired uses the Director model. Typical: Turbo LoRA on pass 1, a clean / other LoRA UNET on refine
+5. Director `images` is the refined clip; `images_pre_refine` is the first pass before upscale (for A/B). `source_images` is still the timeline source, not the first-pass generate
+6. `denoise` is typically 0.2–0.35 (higher = more change). `steps=0` uses about 40% of the first-pass step count
+7. fl2v skips refine by default (protects pinned first/last frames); turn off `skip_fl2v` on Refine to include those shots
+8. Upscale methods: `lanczos` (optional `UPSCALE_MODEL`, e.g. RealESRGAN); `nvidia_rtx_vsr` uses RTX Video Super Resolution (no upscale model)
+9. Segment export with `passes>1` also writes `seg_XXXX_pN.mp4` per round; export-all still only keeps first-pass and the final clip
 
 Example: `example_workflows/minimax_h3_director_refine.json`
 

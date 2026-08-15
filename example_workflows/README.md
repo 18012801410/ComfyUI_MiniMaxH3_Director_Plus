@@ -41,5 +41,7 @@ Refine 示例另把 `images_pre_refine` 接到第二路 `CreateVideo` / `SaveVid
 
 - 不接 Refine 节点 = 原来的单次采样
 - `mode=refine`：同分辨率精修；`mode=upscale`：放大到目标画布再低 denoise 二采
+- `passes`：精修次数（默认 1）；`upscale` 只在第 1 次放大
+- 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型
 - 可选接 `UPSCALE_MODEL`（仅 `upscale` + `lanczos`）；或把 `upscale_method` 设为 `nvidia_rtx_vsr`
 - fl2v 默认跳过二采；关掉 `skip_fl2v` 才会采首尾帧镜头

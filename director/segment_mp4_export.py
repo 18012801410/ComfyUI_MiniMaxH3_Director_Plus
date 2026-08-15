@@ -4,13 +4,16 @@ Best-effort: encode failures must never abort generation. Each run uses a
 timestamp folder: ``output/minimax_seg_export/<YYYYMMDD_HHMMSS>/``.
 
 Files:
-  ``seg_XXXX.mp4`` — final clip (二采 / no Refine)
+  ``seg_XXXX.mp4`` — final clip (last refine pass / no Refine)
   ``seg_XXXX_pre.mp4`` — first pass (一采), only when Refine ran
+  ``seg_XXXX_pN.mp4`` — refine pass N (分段导出且次数>1)
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,9 +56,23 @@ def new_segment_mp4_run_dir(plan: DirectorPlan) -> Path | None:
         return None
 
 
+def _safe_mp4_suffix(suffix: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "", str(suffix or ""))
+
+
 def segment_mp4_path(run_dir: Path, seg: SegmentPlan, *, suffix: str = "") -> Path:
-    tag = f"_{suffix}" if suffix else ""
+    tag = f"_{_safe_mp4_suffix(suffix)}" if _safe_mp4_suffix(suffix) else ""
     return Path(run_dir) / f"seg_{int(seg.index):04d}{tag}.mp4"
+
+
+def mp4_export_kind(path: str | None) -> str:
+    name = Path(str(path or "")).name
+    if name.endswith("_pre.mp4"):
+        return "一采 mp4"
+    m = re.search(r"_p(\d+)\.mp4$", name)
+    if m:
+        return f"第{m.group(1)}轮精修 mp4"
+    return "mp4"
 
 
 def _pre_frames_distinct(pre_frames, frames) -> bool:
@@ -80,6 +97,7 @@ def maybe_export_segment_mp4(
     """Write one segment mp4 into ``run_dir``. Never raises.
 
     ``suffix="pre"`` writes the first-pass clip (``seg_XXXX_pre.mp4``).
+    ``suffix="p2"`` writes refine pass 2 (``seg_XXXX_p2.mp4``).
 
     Returns the absolute path string on success, otherwise None.
     """
@@ -148,3 +166,39 @@ def maybe_export_segment_mp4s(
         if pre_path:
             paths.append(pre_path)
     return paths
+
+
+def copy_segment_mp4_suffix(
+    run_dir: Path | None,
+    plan: DirectorPlan,
+    seg: SegmentPlan,
+    *,
+    dest_suffix: str,
+) -> str | None:
+    """Copy ``seg_XXXX.mp4`` to ``seg_XXXX_<suffix>.mp4``. Never raises."""
+    if run_dir is None or getattr(plan, "export_mode", "all") != "segments":
+        return None
+    tag = _safe_mp4_suffix(dest_suffix)
+    if not tag:
+        return None
+    src = segment_mp4_path(run_dir, seg)
+    dest = segment_mp4_path(run_dir, seg, suffix=tag)
+    try:
+        if not src.is_file():
+            return None
+        shutil.copy2(src, dest)
+        log.info(
+            "MiniMax H3 Director segment #%d copied %s → %s",
+            int(seg.index) + 1,
+            src.name,
+            dest.name,
+        )
+        return str(dest)
+    except Exception as exc:
+        log.warning(
+            "Segment #%d copy to %s failed: %s",
+            int(seg.index) + 1,
+            dest.name,
+            exc,
+        )
+        return None

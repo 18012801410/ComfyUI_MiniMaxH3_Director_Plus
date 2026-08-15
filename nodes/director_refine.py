@@ -6,6 +6,7 @@ from ..director.refine_pack import (
     ASPECT_RATIO_CHOICES,
     DEFAULT_UPSCALE_MEGAPIXELS,
     FOLLOW_DIRECTOR_ASPECT,
+    MAX_REFINE_PASSES,
     MMX_DIR_REFINE,
     REFINE_MODES,
     SEED_MODES,
@@ -70,13 +71,35 @@ class MiniMaxH3DirectorRefine:
                         "tooltip": "二采步数。0 = 自动（约导演台 steps 的 40%，最少 8）。",
                     },
                 ),
+                "passes": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": MAX_REFINE_PASSES,
+                        "tooltip": (
+                            "精修次数。1 = 一次二采。"
+                            "upscale 时只有第 1 次放大，之后都是同分辨率精修。"
+                        ),
+                    },
+                ),
             },
             "optional": {
+                "refine_model": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "Second-pass UNET (二采模型)。"
+                            "不接则用导演台主模型。"
+                            "适合一采挂 Turbo LoRA、二采卸掉或换另一套。"
+                        ),
+                    },
+                ),
                 "seed_mode": (
                     list(SEED_MODES),
                     {
                         "default": "inherit",
-                        "tooltip": "inherit = 用导演台 seed；offset = seed+1。",
+                        "tooltip": "inherit = 用导演台 seed；offset = 每轮 seed+1、+2…。",
                     },
                 ),
                 "aspect_ratio": (
@@ -171,6 +194,7 @@ class MiniMaxH3DirectorRefine:
         mode="refine",
         denoise=0.25,
         steps=10,
+        passes=1,
         seed_mode="inherit",
         aspect_ratio=FOLLOW_DIRECTOR_ASPECT,
         megapixels=DEFAULT_UPSCALE_MEGAPIXELS,
@@ -179,6 +203,8 @@ class MiniMaxH3DirectorRefine:
         skip_fl2v=True,
         upscale_method="lanczos",
         upscale_model=None,
+        refine_model=None,
+        model=None,
         target_width=0,
         target_height=0,
         **kwargs,
@@ -202,10 +228,15 @@ class MiniMaxH3DirectorRefine:
             w = 1280
         if h < 32:
             h = 720
+        try:
+            n_passes = int(passes or 1)
+        except (TypeError, ValueError):
+            n_passes = 1
         pack = pack_refine(
             mode=mode,
             denoise=denoise,
             steps=steps,
+            passes=n_passes,
             seed_mode=seed_mode,
             aspect_ratio=aspect_ratio,
             megapixels=mp,
@@ -216,6 +247,7 @@ class MiniMaxH3DirectorRefine:
             skip_fl2v=skip_fl2v,
             upscale_method=upscale_method,
             upscale_model=upscale_model,
+            sample_model=refine_model if refine_model is not None else model,
         )
         out_w = int(pack.get("target_width") or 0)
         out_h = int(pack.get("target_height") or 0)

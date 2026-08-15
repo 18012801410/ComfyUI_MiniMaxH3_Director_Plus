@@ -11,7 +11,7 @@ from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_e
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
 from .core_sampling import sample_single_stage
-from .refine_pack import refine_will_sample
+from .refine_pack import refine_passes_for, refine_will_sample
 from .refine_sampling import apply_segment_refine
 from .frame_align import minimax_align_frame_count, pad_or_trim_frames
 from .audio_export import (
@@ -56,7 +56,13 @@ from .segment_cache import (
     load_segment_handoff_meta,
     save_segment_cache,
 )
-from .segment_mp4_export import maybe_export_segment_mp4s, new_segment_mp4_run_dir
+from .segment_mp4_export import (
+    copy_segment_mp4_suffix,
+    maybe_export_segment_mp4,
+    maybe_export_segment_mp4s,
+    mp4_export_kind,
+    new_segment_mp4_run_dir,
+)
 from .segment_continuity import (
     concat_continuous_chunks,
     is_continuity_active,
@@ -346,6 +352,7 @@ def execute_director_plan_core(
 
     completed_outputs: dict[int, torch.Tensor] = {}
     completed_pre_refine: dict[int, torch.Tensor] = {}
+    completed_refine_passes: dict[int, list[tuple[str, torch.Tensor]]] = {}
     completed_av_latents: dict[int, dict] = {}
     completed_av_handoff: dict[int, dict] = {}
     completed_audios: dict[int, dict] = {}
@@ -676,9 +683,39 @@ def execute_director_plan_core(
                             completed_audios.get(prev_idx),
                             pre_frames=completed_pre_refine.get(prev_idx),
                         )
+                        extra_passes = list(completed_refine_passes.get(prev_idx) or [])
+                        rewritten_extra: list[tuple[str, torch.Tensor]] = []
+                        for suffix, frames in extra_passes:
+                            clipped = frames
+                            if int(clipped.shape[0]) > prev_export_trim:
+                                clipped, _ = trim_export_tail(
+                                    clipped, None, prev_export_trim, fps=fps
+                                )
+                            rewritten_extra.append((suffix, clipped))
+                            extra_path = maybe_export_segment_mp4(
+                                mp4_run_dir,
+                                plan,
+                                prev_seg,
+                                clipped,
+                                completed_audios.get(prev_idx),
+                                suffix=suffix,
+                            )
+                            if extra_path:
+                                mp4_paths.append(extra_path)
+                        if rewritten_extra:
+                            completed_refine_passes[prev_idx] = rewritten_extra
+                            last_alias = copy_segment_mp4_suffix(
+                                mp4_run_dir,
+                                plan,
+                                prev_seg,
+                                dest_suffix=f"p{len(rewritten_extra) + 1}",
+                            )
+                            if last_alias:
+                                mp4_paths.append(last_alias)
                         for mp4_path in mp4_paths:
                             reports.append(
-                                f"Segment {prev_idx + 1}: mp4 updated after continuity trim → {mp4_path}"
+                                f"Segment {prev_idx + 1}: {mp4_export_kind(mp4_path)} "
+                                f"updated after continuity trim → {mp4_path}"
                             )
                     trimmed_prev_export = int(prev_export_trim)
                     log.info(
@@ -791,6 +828,52 @@ def execute_director_plan_core(
         if first_pass_gpu is not None and upscale_frames is None:
             del first_pass_gpu
             first_pass_gpu = None
+        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        pass_clips: list[tuple[str, torch.Tensor]] = []
+
+        def _export_refine_pass(pass_i: int, n_passes: int, latent: dict) -> None:
+            if mp4_run_dir is None or int(pass_i) >= int(n_passes):
+                return
+            suffix = f"p{int(pass_i)}"
+            try:
+                report_director_progress(
+                    node_id, segment_index=progress_index, segment_total=seg_total,
+                    phase="decode", phase_value=0, phase_max=1, **meta,
+                )
+                decoded_p, audio_p = _decode_av_latent(
+                    latent, vae, audio_vae, decode_audio=decode_audio,
+                )
+                decoded_p, audio_p = _trim_decoded_to_export(
+                    decoded_p,
+                    audio_p,
+                    trim_frames=trim_frames,
+                    export_len=export_len,
+                    plan=plan,
+                )
+                frames_p = decoded_p.cpu().float()
+                del decoded_p
+                path = maybe_export_segment_mp4(
+                    mp4_run_dir,
+                    plan,
+                    seg,
+                    frames_p,
+                    audio_p if isinstance(audio_p, dict) else None,
+                    suffix=suffix,
+                )
+                pass_clips.append((suffix, frames_p))
+                if path:
+                    reports.append(
+                        f"Segment {ui_idx + 1}/{timeline_seg_total}: "
+                        f"{mp4_export_kind(path)} saved → {path}"
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Segment %s refine pass %d mp4 export failed (%s).",
+                    ui_idx + 1,
+                    pass_i,
+                    exc,
+                )
+
         samples, refine_note = apply_segment_refine(
             plan,
             seg,
@@ -811,6 +894,7 @@ def execute_director_plan_core(
             on_step_preview=_report_step_preview if live_tae_preview else None,
             first_pass_images=upscale_frames,
             trim_frames=trim_frames,
+            on_pass=_export_refine_pass if mp4_run_dir is not None else None,
         )
         del upscale_frames
         if first_pass_gpu is not None:
@@ -874,9 +958,10 @@ def execute_director_plan_core(
         )
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
+        completed_refine_passes[seg.index] = pass_clips
 
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
-        # Final clip = 二采; distinct pre_chunk = 一采 (seg_XXXX_pre.mp4).
+        # Final clip = last refine pass; _pre = 一采; _pN = each refine round.
         mp4_paths = maybe_export_segment_mp4s(
             mp4_run_dir,
             plan,
@@ -885,10 +970,17 @@ def execute_director_plan_core(
             audio_dict if isinstance(audio_dict, dict) else None,
             pre_frames=pre_chunk,
         )
+        n_refine = refine_passes_for(getattr(plan, "refine", None)) if will_refine else 1
+        if n_refine > 1:
+            last_alias = copy_segment_mp4_suffix(
+                mp4_run_dir, plan, seg, dest_suffix=f"p{n_refine}",
+            )
+            if last_alias:
+                mp4_paths.append(last_alias)
         for mp4_path in mp4_paths:
-            kind = "一采 mp4" if str(mp4_path).endswith("_pre.mp4") else "mp4"
             reports.append(
-                f"Segment {ui_idx + 1}/{timeline_seg_total}: {kind} saved → {mp4_path}"
+                f"Segment {ui_idx + 1}/{timeline_seg_total}: "
+                f"{mp4_export_kind(mp4_path)} saved → {mp4_path}"
             )
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:

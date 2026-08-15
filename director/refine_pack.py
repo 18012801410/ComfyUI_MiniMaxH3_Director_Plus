@@ -16,6 +16,7 @@ MMX_DIR_REFINE = "MMX_DIR_REFINE"
 REFINE_MODES = ("refine", "upscale")
 SEED_MODES = ("inherit", "offset")
 UPSCALE_METHODS = ("lanczos", "nvidia_rtx_vsr")
+MAX_REFINE_PASSES = 9999
 
 FOLLOW_DIRECTOR_ASPECT = "跟随导演台"
 CUSTOM_ASPECT_RATIO = "自定义"
@@ -154,6 +155,7 @@ def pack_refine(
     mode: str = "refine",
     denoise: float = 0.25,
     steps: int = 10,
+    passes: int = 1,
     seed_mode: str = "inherit",
     aspect_ratio: str = FOLLOW_DIRECTOR_ASPECT,
     megapixels: float = DEFAULT_UPSCALE_MEGAPIXELS,
@@ -164,6 +166,7 @@ def pack_refine(
     skip_fl2v: bool = True,
     upscale_method: str = "lanczos",
     upscale_model=None,
+    sample_model=None,
 ) -> dict[str, Any]:
     mode = str(mode or "refine").strip().lower()
     if mode not in REFINE_MODES:
@@ -188,6 +191,7 @@ def pack_refine(
         "mode": mode,
         "denoise": float(max(0.05, min(0.85, denoise))),
         "steps": int(max(0, min(200, steps))),
+        "passes": refine_passes_for({"passes": passes}),
         "seed_mode": seed_mode,
         "aspect_ratio": ar,
         "megapixels": float(megapixels or DEFAULT_UPSCALE_MEGAPIXELS),
@@ -197,6 +201,8 @@ def pack_refine(
         "upscale_method": method,
         "upscale_model": upscale_model,
         "has_upscale_model": upscale_model is not None,
+        "sample_model": sample_model,
+        "has_sample_model": sample_model is not None,
     }
 
 
@@ -230,15 +236,19 @@ def normalize_refine_pack(
     seed_mode = str(raw.get("seed_mode") or "inherit").strip().lower()
     if seed_mode not in SEED_MODES:
         seed_mode = "inherit"
-    model = raw.get("upscale_model")
+    upscale = raw.get("upscale_model")
     method = str(raw.get("upscale_method") or "lanczos").strip().lower()
     if method not in UPSCALE_METHODS:
         method = "lanczos"
+    sample_model = raw.get("sample_model")
+    if sample_model is None:
+        sample_model = raw.get("model")
     return {
         "enabled": True,
         "mode": mode,
         "denoise": float(max(0.05, min(0.85, float(raw.get("denoise") or 0.25)))),
         "steps": int(max(0, min(200, int(raw.get("steps") or 0)))),
+        "passes": refine_passes_for(raw),
         "seed_mode": seed_mode,
         "aspect_ratio": ar,
         "megapixels": float(raw.get("megapixels") or DEFAULT_UPSCALE_MEGAPIXELS),
@@ -246,8 +256,10 @@ def normalize_refine_pack(
         "target_height": th,
         "skip_fl2v": bool(raw.get("skip_fl2v", True)),
         "upscale_method": method,
-        "upscale_model": model,
-        "has_upscale_model": model is not None,
+        "upscale_model": upscale,
+        "has_upscale_model": upscale is not None,
+        "sample_model": sample_model,
+        "has_sample_model": sample_model is not None,
     }
 
 
@@ -268,9 +280,25 @@ def refine_steps_for(pack: dict[str, Any], first_steps: int) -> int:
     return max(8, int(round(int(first_steps) * 0.4)))
 
 
-def refine_seed_for(pack: dict[str, Any], seed: int) -> int:
+def refine_passes_for(pack: dict[str, Any] | None) -> int:
+    try:
+        n = int((pack or {}).get("passes") or 1)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, min(MAX_REFINE_PASSES, n))
+
+
+def refine_model_for(pack: dict[str, Any] | None, fallback):
+    """Second-pass UNET. Unconnected Refine.refine_model → Director main model."""
+    custom = (pack or {}).get("sample_model")
+    if custom is None:
+        custom = (pack or {}).get("model")
+    return fallback if custom is None else custom
+
+
+def refine_seed_for(pack: dict[str, Any], seed: int, pass_index: int = 0) -> int:
     if pack.get("seed_mode") == "offset":
-        return int(seed) + 1
+        return int(seed) + 1 + int(max(0, pass_index))
     return int(seed)
 
 
@@ -283,12 +311,14 @@ def refine_fingerprint(plan) -> dict[str, Any]:
         "refine_mode": pack.get("mode") or "refine",
         "refine_denoise": round(float(pack.get("denoise") or 0), 3),
         "refine_steps": int(pack.get("steps") or 0),
+        "refine_passes": refine_passes_for(pack),
         "refine_seed_mode": pack.get("seed_mode") or "inherit",
         "refine_target": f"{int(pack.get('target_width') or 0)}x{int(pack.get('target_height') or 0)}",
         "refine_aspect": pack.get("aspect_ratio") or FOLLOW_DIRECTOR_ASPECT,
         "refine_megapixels": round(float(pack.get("megapixels") or 0), 3),
         "refine_upscale_method": pack.get("upscale_method") or "lanczos",
         "refine_upscale_model": bool(pack.get("has_upscale_model")),
+        "refine_sample_model": bool(pack.get("has_sample_model") or pack.get("sample_model") is not None),
         "refine_skip_fl2v": bool(pack.get("skip_fl2v", True)),
     }
 
@@ -312,7 +342,12 @@ def refine_report_line(plan) -> str | None:
             f", {ar} → {int(pack.get('target_width') or 0)}×{int(pack.get('target_height') or 0)}"
             f", {how}"
         )
+    n_passes = refine_passes_for(pack)
+    pass_note = f", passes={n_passes}" if n_passes > 1 else ""
+    model_note = (
+        ", 二采模型" if (pack.get("has_sample_model") or pack.get("sample_model") is not None) else ""
+    )
     return (
         f"Refine: ON ({mode}, denoise={float(pack.get('denoise') or 0):.2f}, "
-        f"steps={int(pack.get('steps') or 0) or 'auto'}{extra})"
+        f"steps={int(pack.get('steps') or 0) or 'auto'}{pass_note}{model_note}{extra})"
     )

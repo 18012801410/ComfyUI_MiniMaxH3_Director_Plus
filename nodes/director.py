@@ -96,6 +96,8 @@ class MiniMaxH3Director:
                         "tooltip": (
                             "Optional Refine node. When connected, each segment runs a second "
                             "sample pass (same-size refine, or upscale then sample). "
+                            "Wire a MODEL into Refine.refine_model to use a different UNET for that pass; "
+                            "unwired uses this Director model. "
                             "images is the refined result; images_pre_refine is the first pass. "
                             "Unconnected = single-pass (current behavior)."
                         ),
