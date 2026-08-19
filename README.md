@@ -191,6 +191,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 模型
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — 权重与文档
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动/音频续拍思路参考
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent 放大架构与权重格式参考
 
 ## 许可证
 

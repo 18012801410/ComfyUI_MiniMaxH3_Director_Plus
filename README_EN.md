@@ -192,6 +192,7 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 model
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent upscaler architecture and checkpoint format
 
 ## License
 
