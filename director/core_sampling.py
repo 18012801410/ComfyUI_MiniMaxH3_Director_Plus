@@ -1,4 +1,9 @@
-"""Single-stage sampling for MiniMax H3 (SigmaShift + KSampler)."""
+"""Single-stage sampling for MiniMax H3 (SigmaShift + KSampler).
+
+Pass ``sigmas`` to override the KSampler schedule (ManualSigmas-style).
+``apply_shift=False`` skips ``MiniMaxH3SigmaShift``; Refine still applies it
+so video/audio timesteps match the first pass.
+"""
 
 from __future__ import annotations
 
@@ -39,6 +44,8 @@ def sample_single_stage(
     preview_every: int = 1,
     denoise: float = 1.0,
     phase_name: str = "sample",
+    sigmas=None,
+    apply_shift: bool = True,
 ):
     import comfy.sample
     import comfy.utils
@@ -50,14 +57,26 @@ def sample_single_stage(
             on_phase(phase, value)
 
     notify(phase_name, 0)
-    shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
-    model_shifted = _unpack_node_output(shifted)[0]
+    model_use = model
+    if apply_shift:
+        shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
+        model_use = _unpack_node_output(shifted)[0]
 
     neg = negative if negative else []
-    steps = int(steps)
+    sigma_list = None
+    if sigmas is not None:
+        import torch
+
+        if torch.is_tensor(sigmas):
+            sigma_list = sigmas.detach().float().cpu().reshape(-1)
+        else:
+            sigma_list = torch.tensor([float(x) for x in sigmas], dtype=torch.float32)
+        steps = max(1, int(sigma_list.numel()) - 1)
+    else:
+        steps = int(steps)
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(
-        model_shifted,
+        model_use,
         latent_image,
         latent.get("downscale_ratio_spacial", None),
         latent.get("downscale_ratio_temporal", None),
@@ -70,13 +89,19 @@ def sample_single_stage(
     )
     noise_mask = latent.get("noise_mask", None)
 
-    base_cb = latent_preview.prepare_callback(model_shifted, steps)
+    base_cb = latent_preview.prepare_callback(model_use, steps)
     every = max(1, int(preview_every))
 
     def callback(step, x0, x, total_steps):
         if on_step_preview is not None:
             try:
-                if step % every == 0 or step >= max(0, int(total_steps) - 1):
+                last = max(0, int(total_steps) - 1)
+                # preview_every < 0 → only the last step (sigma refine starts dirty).
+                if int(preview_every) < 0:
+                    show = step >= last
+                else:
+                    show = step % every == 0 or step >= last
+                if show:
                     on_step_preview(int(step), int(total_steps), x0)
             except Exception as exc:
                 log.debug("Step preview callback skipped: %s", exc)
@@ -84,8 +109,11 @@ def sample_single_stage(
             base_cb(step, x0, x, total_steps)
 
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+    # Manual sigmas still go through KSampler.sample (same path as first pass /
+    # schedule=steps). sample_custom skips SigmaShift wiring and can yield
+    # undecodable AV latents on H3.
     samples = comfy.sample.sample(
-        model_shifted,
+        model_use,
         noise,
         steps,
         float(cfg),
@@ -94,11 +122,12 @@ def sample_single_stage(
         positive,
         neg,
         latent_image,
-        denoise=float(max(0.0, min(1.0, denoise))),
+        denoise=1.0 if sigma_list is not None else float(max(0.0, min(1.0, denoise))),
         noise_mask=noise_mask,
         callback=callback,
         disable_pbar=disable_pbar,
         seed=int(seed),
+        sigmas=sigma_list,
     )
     out = latent.copy()
     out.pop("downscale_ratio_spacial", None)
