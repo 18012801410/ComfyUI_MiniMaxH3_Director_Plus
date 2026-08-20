@@ -796,8 +796,8 @@ export function ensureImageBatchTimeline(editor) {
         }
         seg.negativePrompt = seg.negativePrompt ?? "";
         seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
-        // Do NOT clear refs for i2v — backend ignores them, but wiping here breaks
-        // r2v → i2v → r2v (user loses uploaded reference images).
+        // Do NOT copy r2v refs into i2v/t2v here — each task keeps its own workspace.
+        // Backend ignores refs on i2v/t2v; r2v snapshots restore them on switch-back.
         seg.refs = seg.refs || [];
         seg.refAudios = seg.refAudios || seg.ref_audios || [];
         seg.refVideos = seg.refVideos || seg.ref_videos || [];
@@ -929,6 +929,7 @@ async function uploadSegSource(editor, index) {
             editor.renderImageBatchGroups();
             editor.updateOutputPreview?.();
             editor.commit(false, { syncTimeline: true });
+            editor.scheduleRender?.();
             try {
                 const dims = await readImageDimensions(file);
                 const live = (editor.timeline.segments || []).find((s) => s.id === seg.id) || seg;
@@ -1915,7 +1916,7 @@ function renderBatchGroupPicker(editor, ctx) {
     if (!picker) return;
     const segs = editor.timeline?.segments || [];
     const solo = isBatchDetailSolo(editor);
-    const usePicker = solo && segs.length > 1 && !editor.isR2vBatch?.();
+    const usePicker = solo && segs.length > 1 && !editor.usesBatchTimeline?.();
     picker.innerHTML = "";
     picker.classList.toggle("visible", usePicker);
     if (!usePicker) return;
@@ -2366,7 +2367,7 @@ export function getImageBatchUiHeight(editor) {
     // r2v cards are tall; list scrolls inside BATCH_LIST_MAX_H — do NOT sum full card
     // heights into node size or the DOM widget grows a huge empty region below.
     const rowH = key === "r2v" ? 420 : (isVideoBatchTask(key) ? 155 : 130);
-    const showPicker = solo && (editor?.timeline?.segments?.length || 0) > 1 && !editor?.isR2vBatch?.();
+    const showPicker = solo && (editor?.timeline?.segments?.length || 0) > 1 && !editor?.usesBatchTimeline?.();
     const pickerH = showPicker ? 56 : 0;
     const listContentH = n * rowH + Math.max(0, n - 1) * BATCH_LIST_GAP + pickerH;
     const listH = Math.min(listContentH, BATCH_LIST_MAX_H);
