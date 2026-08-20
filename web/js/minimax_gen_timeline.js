@@ -406,3 +406,72 @@ export function newBatchSegment(overrides = {}) {
         ...(isVideo ? { durationSec } : {}),
     };
 }
+
+/** Extensions ComfyUI input/ will accept for director uploads. */
+const SAFE_UPLOAD_EXTS = new Set([
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+    ".mp4", ".webm", ".mov", ".mkv", ".avi",
+    ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac",
+]);
+const WIN_RESERVED_STEM = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+function extFromMime(mimeType) {
+    const mime = String(mimeType || "").toLowerCase();
+    if (mime.includes("png")) return ".png";
+    if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
+    if (mime.includes("webp")) return ".webp";
+    if (mime.includes("gif")) return ".gif";
+    if (mime.includes("bmp")) return ".bmp";
+    if (mime.includes("mp4")) return ".mp4";
+    if (mime.includes("webm")) return ".webm";
+    if (mime.includes("quicktime") || mime.includes("mov")) return ".mov";
+    if (mime.includes("wav")) return ".wav";
+    if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
+    if (mime.includes("flac")) return ".flac";
+    if (mime.includes("ogg")) return ".ogg";
+    if (mime.includes("aac") || mime.includes("m4a")) return ".m4a";
+    return "";
+}
+
+/** Windows CreateFile rejects these in a basename; CJK (微信图片_*.jpg) is fine. */
+const WIN_ILLEGAL_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
+
+/**
+ * Keep original names (including 微信图片_*.jpg). Only strip path pieces and
+ * characters Windows cannot store. Unique ASCII fallback if the stem is empty.
+ */
+export function safeUploadFilename(name, mimeType = "") {
+    const raw = String(name || "upload").replace(/\\/g, "/").split("/").pop() || "upload";
+    const dot = raw.lastIndexOf(".");
+    let ext = "";
+    let stem = raw;
+    if (dot > 0) {
+        const maybe = raw.slice(dot).toLowerCase();
+        if (SAFE_UPLOAD_EXTS.has(maybe)) {
+            ext = maybe === ".jpeg" ? ".jpg" : maybe;
+            stem = raw.slice(0, dot);
+        }
+    }
+    if (!ext) ext = extFromMime(mimeType) || ".bin";
+    stem = stem.replace(WIN_ILLEGAL_CHARS, "_").replace(/[. ]+$/g, "").slice(0, 80);
+    if (!stem || WIN_RESERVED_STEM.test(stem)) {
+        const stamp = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        stem = `upload_${stamp}`;
+    }
+    return `${stem}${ext}`;
+}
+
+/** Rename only when the original name would be an illegal Windows path. */
+export function fileForComfyUpload(file) {
+    if (!file) return file;
+    const filename = safeUploadFilename(file.name, file.type);
+    if (filename === file.name) return file;
+    try {
+        return new File([file], filename, {
+            type: file.type || "application/octet-stream",
+            lastModified: file.lastModified,
+        });
+    } catch {
+        return file;
+    }
+}

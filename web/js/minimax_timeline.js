@@ -40,6 +40,8 @@ import {
     taskUsesReferenceAudios,
     taskUsesReferenceImages,
     taskUsesReferenceVideo,
+    fileForComfyUpload,
+    safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import {
     IMAGE_BATCH_STYLES,
@@ -50,6 +52,7 @@ import {
     ensureImageBatchTimeline,
     formatMediaDuration,
     getImageBatchUiHeight,
+    isBatchDetailSolo,
     listCommonImageRefs,
     mountImageBatchPanel,
     flushBatchPromptInputs,
@@ -114,6 +117,11 @@ const HANDLE_PX = 14;
 const RUN_CHECK_SIZE = 14;
 const RUN_CHECK_HIT_PAD_X = 8;
 const RUN_CHECK_HIT_PAD_Y = 4;
+/** Canvas-drawn 段间引导 marker at a clip joint (only when master switch is on). */
+const CONT_JOINT_W = 22;
+const CONT_JOINT_H = 16;
+const CONT_JOINT_Y = TRACK_Y + 4;
+const CONT_JOINT_HIT_PAD = 5;
 const THUMB_MAX_W = 168;
 const THUMB_JPEG_Q = 0.55;
 const TIMELINE_SYNC_DEBOUNCE_MS = 500;
@@ -452,7 +460,7 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-main>.bd-batch:not(.hidden){
   flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column
 }
-.bd-wrap.bd-batch-fill .bd-batch-toolbar,.bd-wrap.bd-batch-fill .bd-batch-i2v-notice{flex-shrink:0}
+.bd-wrap.bd-batch-fill .bd-batch-toolbar,.bd-wrap.bd-batch-fill .bd-batch-i2v-notice,.bd-wrap.bd-batch-fill .bd-batch-picker{flex-shrink:0}
 .bd-wrap.bd-batch-fill .bd-batch-list{
   flex:1 1 0;min-height:0;max-height:none!important;overflow-y:auto;height:auto;
   display:flex;flex-direction:column
@@ -806,10 +814,11 @@ function coerceTimelineFps(value, fallback = 24) {
 }
 
 async function uploadToInput(file) {
+    const uploadFile = fileForComfyUpload(file);
     const body = new FormData();
-    body.append("image", file);
+    body.append("image", uploadFile, uploadFile.name);
     body.append("type", "input");
-    body.append("overwrite", "true");
+    body.append("overwrite", "false");
     const resp = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!resp.ok) {
         const text = await resp.text();
@@ -819,6 +828,7 @@ async function uploadToInput(file) {
 }
 
 async function uploadVideoChunked(file, onProgress) {
+    const filename = safeUploadFilename(file?.name, file?.type);
     const uploadId = crypto.randomUUID();
     const totalChunks = Math.ceil(file.size / MINIMAX_CHUNK_SIZE);
     for (let i = 0; i < totalChunks; i++) {
@@ -828,8 +838,8 @@ async function uploadVideoChunked(file, onProgress) {
         body.append("upload_id", uploadId);
         body.append("chunk_index", String(i));
         body.append("total_chunks", String(totalChunks));
-        body.append("filename", file.name);
-        body.append("chunk", file.slice(start, end), `${file.name}.part`);
+        body.append("filename", filename);
+        body.append("chunk", file.slice(start, end), `${filename}.part`);
         const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
         if (!resp.ok) {
             const text = await resp.text();
@@ -1261,6 +1271,7 @@ function parseTimeline(raw, totalFrames, fps) {
         runSelectEnabled: false,
         runSelection: [],
         liveTaePreview: true,
+        batchDetailMode: "solo",
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
     };
     if (!raw?.trim()) return base;
@@ -1361,6 +1372,8 @@ function parseTimeline(raw, totalFrames, fps) {
         data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
         // Default on when missing (older timelines).
         data.liveTaePreview = data.liveTaePreview !== false && data.live_tae_preview !== false;
+        const detailMode = data.batchDetailMode ?? data.batch_detail_mode;
+        data.batchDetailMode = detailMode === "all" ? "all" : "solo";
         if (data.timelineMode === "fl2v" || resolveTaskKey(data.global?.taskType || "") === "fl2v") {
             data.timelineMode = "fl2v";
             data.editMode = "segment";
@@ -1845,8 +1858,13 @@ class MiniMaxH3DirectorEditor {
     _syncBatchRunHighlight() {
         if (!this.isImageBatch?.() || !this.batchList) return;
         const runningIdx = this._runHighlightSeg;
-        this.batchList.querySelectorAll(".bd-batch-card").forEach((card, i) => {
-            card.classList.toggle("running", i === runningIdx);
+        this.batchList.querySelectorAll(".bd-batch-card").forEach((card) => {
+            const i = parseInt(card.dataset.batchIndex, 10);
+            card.classList.toggle("running", Number.isFinite(i) && i === runningIdx);
+        });
+        this.batchPicker?.querySelectorAll?.(".bd-batch-pick").forEach((chip) => {
+            const i = parseInt(chip.dataset.batchIndex, 10);
+            chip.classList.toggle("running", Number.isFinite(i) && i === runningIdx);
         });
         this._syncR2vCardSelection?.();
     }
@@ -2372,6 +2390,8 @@ class MiniMaxH3DirectorEditor {
         this.batchHint = batchUi.hint;
         this.batchI2vNotice = batchUi.i2vNotice;
         this.batchAddBtn = batchUi.addBtn;
+        this.batchPicker = batchUi.picker;
+        this.batchDetailModeBtn = batchUi.detailModeBtn;
         wireBatchRunSelectControls(this, batchUi);
 
         this.fl2vUi = mountFl2vPanel(this.mainBody);
@@ -2740,25 +2760,23 @@ class MiniMaxH3DirectorEditor {
 
         this.canvas.addEventListener("mousedown", (e) => this.onMouseDown(e));
         this.canvas.addEventListener("dblclick", (e) => {
-            if (this.isFl2vMode()) {
-                stopDomEvent(e);
-                e.preventDefault();
-                const { x, y } = this.getMousePos(e);
-                const hit = this.hitTest(x, y);
-                if (hit?.type === "segment" || hit?.type === "edge") {
-                    const idx = hit.index ?? this.selectedIndex;
-                    if (idx !== this.selectedIndex) flushFl2vPromptDraft(this);
-                    this.selectedIndex = idx;
-                    this.updateSelectionUI();
-                    updateFl2vDetailUI(this);
-                    this._fl2vUploadMode = "slot";
-                    this._fl2vSlotKind = "start";
-                    this._fl2vSlotShotIndex = idx;
-                    this.fl2vUi?.fileInput?.click();
-                }
-                return;
+            stopDomEvent(e);
+            e.preventDefault();
+            // fl2v: double-click still replaces the start frame. Other modes do not split.
+            if (!this.isFl2vMode()) return;
+            const { x, y } = this.getMousePos(e);
+            const hit = this.hitTest(x, y);
+            if (hit?.type === "segment" || hit?.type === "edge") {
+                const idx = hit.index ?? this.selectedIndex;
+                if (idx !== this.selectedIndex) flushFl2vPromptDraft(this);
+                this.selectedIndex = idx;
+                this.updateSelectionUI();
+                updateFl2vDetailUI(this);
+                this._fl2vUploadMode = "slot";
+                this._fl2vSlotKind = "start";
+                this._fl2vSlotShotIndex = idx;
+                this.fl2vUi?.fileInput?.click();
             }
-            this.addSplitAtMouse(e);
         });
         this.canvas.addEventListener("contextmenu", (e) => {
             e.preventDefault();
@@ -2772,8 +2790,16 @@ class MiniMaxH3DirectorEditor {
             const { x, y } = this.getMousePos(e);
             const hit = this.hitTest(x, y);
             this.canvas.classList.remove("bd-grab");
-            if (hit?.type === "run-check" || hit?.type === "split") {
+            if (hit?.type === "run-check" || hit?.type === "split" || hit?.type === "continuity-joint") {
                 this.canvas.style.cursor = "pointer";
+                if (hit.type === "continuity-joint") {
+                    this.canvas.title = t(
+                        hit.on ? "tooltip.continuityJointOn" : "tooltip.continuityJointOff",
+                        { a: hit.a, b: hit.b },
+                    );
+                } else {
+                    this.canvas.title = "";
+                }
             } else if (hit?.type === "edge") {
                 // Edge drag is always horizontal (change start/length); keep ↔ cursor.
                 this.canvas.style.cursor = "ew-resize";
@@ -3183,10 +3209,21 @@ class MiniMaxH3DirectorEditor {
         const runSelectOn = this.isRunSelectEnabled() && this.supportsRunSelect();
         const focusSel = this.isR2vBatch();
         const cards = this.batchList.querySelectorAll(".bd-batch-card");
-        cards.forEach((el, i) => {
+        cards.forEach((el) => {
+            const i = parseInt(el.dataset.batchIndex, 10);
+            if (!Number.isFinite(i)) return;
             const runOn = !runSelectOn || this.isSegmentRunEnabled(i);
-            // t2v/i2v: no focus "selected" border — only run-on/run-skipped when 选择运行.
             el.classList.toggle("selected", focusSel && i === this.selectedIndex);
+            el.classList.toggle("run-on", runSelectOn && runOn);
+            el.classList.toggle("run-skipped", runSelectOn && !runOn);
+            const cb = el.querySelector(".bd-batch-run-check");
+            if (cb) cb.checked = runOn;
+        });
+        this.batchPicker?.querySelectorAll?.(".bd-batch-pick").forEach((el) => {
+            const i = parseInt(el.dataset.batchIndex, 10);
+            if (!Number.isFinite(i)) return;
+            const runOn = !runSelectOn || this.isSegmentRunEnabled(i);
+            el.classList.toggle("selected", i === this.selectedIndex);
             el.classList.toggle("run-on", runSelectOn && runOn);
             el.classList.toggle("run-skipped", runSelectOn && !runOn);
             const cb = el.querySelector(".bd-batch-run-check");
@@ -3649,9 +3686,10 @@ class MiniMaxH3DirectorEditor {
         // t2v / i2v / r2v: never show source-video upload (fl2v keeps "上传图片").
         this.btnVideo?.classList.toggle("hidden", (hideVideoUpload && !isFl2v) || isR2v);
         this.btnVideoAppend?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
-        this.controlsBar?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
-        this.boundsEl?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
-        this.timecodeEl?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
+        // Playback / seek / zoom are for source-video (v2v) and fl2v preview. r2v has no source clip.
+        this.controlsBar?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
+        this.boundsEl?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
+        this.timecodeEl?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
         this.viewport?.classList.toggle("hidden", isBatch && !isR2v);
         this.updateStageVisibility();
         this.updateLiveSamplePanel();
@@ -6329,6 +6367,146 @@ class MiniMaxH3DirectorEditor {
         };
     }
 
+    /** Master「段间引导」on + eligible task with ≥2 clips. */
+    _showsContinuityJoints() {
+        return isContinuityEligible(this) && isContinuityMasterEnabled(this.timeline?.output);
+    }
+
+    /**
+     * Touching clip pairs in visual (time) order. `rightIndex` is the array index
+     * whose `continuityFromPrev` flag owns this joint.
+     */
+    _continuityJointList(segs) {
+        const ordered = (segs || [])
+            .map((seg, arrayIndex) => ({ seg, arrayIndex }))
+            .sort((a, b) => a.seg.start - b.seg.start || a.arrayIndex - b.arrayIndex);
+        const joints = [];
+        for (let r = 1; r < ordered.length; r++) {
+            const left = ordered[r - 1];
+            const right = ordered[r];
+            const leftEnd = (left.seg.start || 0) + (left.seg.length || 0);
+            if (Math.abs(leftEnd - (right.seg.start || 0)) > 2) continue;
+            joints.push({
+                leftIndex: left.arrayIndex,
+                rightIndex: right.arrayIndex,
+                a: r,
+                b: r + 1,
+                frame: right.seg.start,
+                on: isSegmentContinuityFromPrev(right.seg, right.arrayIndex),
+            });
+        }
+        return joints;
+    }
+
+    _continuityJointGeometry(frame, width) {
+        const x = this.frameToX(frame, width);
+        const w = CONT_JOINT_W;
+        const h = CONT_JOINT_H;
+        const y = CONT_JOINT_Y;
+        return {
+            x,
+            y,
+            w,
+            h,
+            hitX0: x - Math.max(w / 2, 16) - CONT_JOINT_HIT_PAD,
+            hitX1: x + Math.max(w / 2, 16) + CONT_JOINT_HIT_PAD,
+            // Include the S{n}→S{n+1} chip in the label band.
+            hitY0: RULER_H + 1,
+            hitY1: y + h + CONT_JOINT_HIT_PAD,
+        };
+    }
+
+    _roundRectPath(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        if (typeof ctx.roundRect === "function") {
+            ctx.roundRect(x, y, w, h, rr);
+            return;
+        }
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+    }
+
+    /** Simple ↔ link glyph centered in the joint pill. */
+    _drawContinuityLinkArrow(ctx, cx, cy, color) {
+        const half = 6.5;
+        const head = 3.2;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(cx - half, cy);
+        ctx.lineTo(cx + half, cy);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx - half + head, cy - 3);
+        ctx.lineTo(cx - half, cy);
+        ctx.lineTo(cx - half + head, cy + 3);
+        ctx.moveTo(cx + half - head, cy - 3);
+        ctx.lineTo(cx + half, cy);
+        ctx.lineTo(cx + half - head, cy + 3);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    _drawContinuityJoints(width, segs) {
+        if (!this._showsContinuityJoints() || this._drag?.kind === "reorder") return;
+        const ctx = this.ctx;
+        for (const joint of this._continuityJointList(segs)) {
+            const g = this._continuityJointGeometry(joint.frame, width);
+            const on = joint.on;
+            const accent = on ? "#4fff8f" : "#7a7a7a";
+            const fill = on ? "rgba(18, 48, 32, 0.96)" : "rgba(38, 38, 38, 0.94)";
+            const rx = g.x - g.w / 2;
+            ctx.save();
+            this._roundRectPath(ctx, rx, g.y, g.w, g.h, 8);
+            ctx.fillStyle = fill;
+            ctx.fill();
+            ctx.strokeStyle = accent;
+            ctx.lineWidth = on ? 1.5 : 1.15;
+            ctx.stroke();
+            this._drawContinuityLinkArrow(ctx, g.x, g.y + g.h / 2, accent);
+            const label = `S${joint.a}→S${joint.b}`;
+            ctx.font = "800 8px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            const tw = Math.max(g.w + 4, ctx.measureText(label).width + 8);
+            const ly = RULER_H + 3;
+            const lh = SEG_LABEL_H - 6;
+            this._roundRectPath(ctx, g.x - tw / 2, ly, tw, lh, 4);
+            ctx.fillStyle = fill;
+            ctx.fill();
+            ctx.strokeStyle = accent;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = on ? "#b8ffd0" : "#9a9a9a";
+            ctx.fillText(label, g.x, ly + lh / 2);
+            ctx.restore();
+        }
+    }
+
+    toggleContinuityJoint(rightIndex) {
+        if (!(rightIndex > 0)) return;
+        const seg = this.timeline.segments?.[rightIndex];
+        if (!seg) return;
+        const next = !isSegmentContinuityFromPrev(seg, rightIndex);
+        seg.continuityFromPrev = next;
+        if (this.isFl2vMode()) {
+            const shot = this.timeline.shots?.[rightIndex];
+            if (shot) shot.continuityFromPrev = next;
+        }
+        this.commit(false, { syncTimeline: true });
+        this.flushTimelineSync?.();
+        if (this.isFl2vMode()) updateFl2vDetailUI(this);
+    }
+
     /** Draw fl2v edge grips; joints are split (top=prev yellow, bottom=next cyan). */
     _drawFl2vEdgeHandles(segs, index, x0, x1, width) {
         const ordered = (segs || [])
@@ -6442,6 +6620,23 @@ class MiniMaxH3DirectorEditor {
             }
         }
 
+        // Continuity pills sit on the seam (top of clip); win over split/edge in that pad.
+        if (this._showsContinuityJoints() && y >= RULER_H && y <= TRACK_Y + CONT_JOINT_H + 12) {
+            for (const joint of this._continuityJointList(segs)) {
+                const g = this._continuityJointGeometry(joint.frame, width);
+                if (x >= g.hitX0 && x <= g.hitX1 && y >= g.hitY0 && y <= g.hitY1) {
+                    return {
+                        type: "continuity-joint",
+                        rightIndex: joint.rightIndex,
+                        leftIndex: joint.leftIndex,
+                        a: joint.a,
+                        b: joint.b,
+                        on: joint.on,
+                    };
+                }
+            }
+        }
+
         // Split markers: label band + full track height, before segment/edge hits.
         // (Previously label band returned null, so diamond clicks never registered.)
         if (y >= RULER_H && y <= trackBottom) {
@@ -6524,6 +6719,9 @@ class MiniMaxH3DirectorEditor {
             this.clearSplitSelection();
         } else if (hit.type === "run-check") {
             this.toggleSegmentRun(hit.index);
+            this._drag = null;
+        } else if (hit.type === "continuity-joint") {
+            this.toggleContinuityJoint(hit.rightIndex);
             this._drag = null;
         } else if (hit.type === "split") {
             this.selectSplitFrame(hit.frame);
@@ -7905,6 +8103,8 @@ class MiniMaxH3DirectorEditor {
             }
         }
 
+        this._drawContinuityJoints(width, segs);
+
         const phx = this.frameToX(this.currentFrame, width);
         this.ctx.strokeStyle = "#ff4444";
         this.ctx.lineWidth = 2;
@@ -8013,7 +8213,15 @@ class MiniMaxH3DirectorEditor {
         updateFl2vToolbarBtns(this);
         updateR2vToolbarBtns(this);
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
-        if (this.isImageBatch()) this._syncR2vCardSelection();
+        if (this.isImageBatch()) {
+            const shown = this.batchList?.querySelector(".bd-batch-card");
+            const shownIdx = shown ? parseInt(shown.dataset.batchIndex, 10) : NaN;
+            if (isBatchDetailSolo(this) && shownIdx !== this.selectedIndex) {
+                this.renderImageBatchGroups();
+            } else {
+                this._syncR2vCardSelection();
+            }
+        }
 
         const r2vOn = this.isR2vCommonEnabled();
         const hideTimeline = (this.isImageBatch() && !r2vOn) || this.isGenMode();

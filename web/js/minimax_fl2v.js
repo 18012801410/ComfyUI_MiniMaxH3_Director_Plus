@@ -18,6 +18,7 @@ import {
     preferredDurationSecFromFrames,
     resolveTaskKey,
     roundDurationSec,
+    fileForComfyUpload,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 
@@ -97,10 +98,11 @@ export function fl2vViewUrl(imageFile) {
 }
 
 async function uploadImage(file) {
+    const uploadFile = fileForComfyUpload(file);
     const body = new FormData();
-    body.append("image", file);
+    body.append("image", uploadFile, uploadFile.name);
     body.append("type", "input");
-    body.append("overwrite", "true");
+    body.append("overwrite", "false");
     const resp = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!resp.ok) throw new Error((await resp.text()) || `Upload failed (${resp.status})`);
     return resp.json();

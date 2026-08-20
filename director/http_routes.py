@@ -14,14 +14,25 @@ from server import PromptServer
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 CHUNK_ROOT = os.path.join(folder_paths.get_temp_directory(), "minimax_upload_chunks")
-_SAFE_NAME = re.compile(r"[^A-Za-z0-9._\-()\u4e00-\u9fff]+")
+_WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
+_SAFE_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _ROUTES_REGISTERED = False
 
 
 def _safe_basename(name: str) -> str:
-    base = os.path.basename(str(name or "video.mp4").replace("\\", "/"))
-    base = _SAFE_NAME.sub("_", base).strip("._")
-    return base or "video.mp4"
+    """Keep CJK names; only strip path pieces and Windows-illegal characters."""
+    base = os.path.basename(str(name or "upload.bin").replace("\\", "/"))
+    stem, ext = os.path.splitext(base)
+    ext = ext.lower()
+    if not _SAFE_EXT.fullmatch(ext):
+        ext = ".bin"
+    if ext == ".jpeg":
+        ext = ".jpg"
+    stem = _WIN_ILLEGAL.sub("_", stem).rstrip(" .")[:80]
+    if not stem or _WIN_RESERVED.match(stem):
+        stem = "upload"
+    return f"{stem}{ext}"
 
 
 async def minimax_upload_video_chunk(request):
