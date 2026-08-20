@@ -1245,7 +1245,7 @@ export function bindFl2vEvents(editor) {
             const shot = promptTargetShot();
             if (!shot) return;
             shot[field] = el.value || "";
-            editor.scheduleRender();
+            editor._schedulePromptRender();
         });
         el.addEventListener("focus", () => {
             if (!Number.isFinite(editor._fl2vPromptSegIndex)) {

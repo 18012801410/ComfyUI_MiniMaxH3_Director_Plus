@@ -1554,6 +1554,7 @@ class MiniMaxH3DirectorEditor {
         this._renderPending = false;
         this._settleRenderTimer = null;
         this._settleRenderLateTimer = null;
+        this._promptRenderTimer = null;
         this._lastSeekUiMs = 0;
         this._playCanvasWidth = 0;
         this._pauseSettling = false;
@@ -2988,6 +2989,8 @@ class MiniMaxH3DirectorEditor {
         clearTimeout(this._syncTimer);
         clearTimeout(this._settleRenderTimer);
         clearTimeout(this._settleRenderLateTimer);
+        clearTimeout(this._promptRenderTimer);
+        this._promptRenderTimer = null;
         this._settleRenderTimer = null;
         this._settleRenderLateTimer = null;
         cancelAnimationFrame(this._resizeRaf);
@@ -8139,7 +8142,14 @@ class MiniMaxH3DirectorEditor {
         let label = prompt;
         const maxW = pxWidth - 10;
         if (ctx.measureText(label).width > maxW) {
+            // Estimate truncation first — avoids O(n) measureText on long prompts.
+            const fullW = ctx.measureText(label).width;
+            const approx = Math.floor(maxW * label.length / Math.max(1, fullW));
+            label = label.slice(0, Math.max(0, approx - 2));
             while (label.length > 0 && ctx.measureText(label + "…").width > maxW) label = label.slice(0, -1);
+            while (label.length < prompt.length && ctx.measureText(label + prompt[label.length] + "…").width <= maxW) {
+                label += prompt[label.length];
+            }
             label += "…";
         }
         ctx.fillText(label, startX + pxWidth / 2, overlayY + overlayH / 2);
@@ -9285,7 +9295,17 @@ class MiniMaxH3DirectorEditor {
         }
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();
-        this.scheduleRender();
+        if (field === "prompt") this._schedulePromptRender();
+        else this.scheduleRender();
+    }
+
+    /** Debounced render for prompt typing — avoids full canvas redraw on every keystroke. */
+    _schedulePromptRender() {
+        if (this._promptRenderTimer != null) return;
+        this._promptRenderTimer = setTimeout(() => {
+            this._promptRenderTimer = null;
+            this.scheduleRender();
+        }, 160);
     }
 
     onSegField(field, value) {
@@ -9293,7 +9313,7 @@ class MiniMaxH3DirectorEditor {
         if (!seg) return;
         seg[field] = value;
         this.scheduleTimelineSync();
-        this.scheduleRender();
+        this._schedulePromptRender();
     }
 
     onNegativePrompt(value) {
