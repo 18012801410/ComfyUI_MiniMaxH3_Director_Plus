@@ -58,6 +58,7 @@ const ZH = {
     "tooltip.dragR2vOrder": "拖动：调整素材组顺序",
     "tooltip.dragPromptGroupOrder": "拖动：调整提示词组顺序",
     "tooltip.dragSegmentOrder": "拖动：调整片段顺序",
+    "tooltip.promptEditorResize": "上下拖动调整提示词框高度；方向键可微调",
 
     "output.totalDurationSec": "总时长（秒）",
     "output.resolution": "输出分辨率",
@@ -453,6 +454,7 @@ const EN = {
     "tooltip.dragR2vOrder": "Drag: reorder asset groups",
     "tooltip.dragPromptGroupOrder": "Drag: reorder prompt groups",
     "tooltip.dragSegmentOrder": "Drag: reorder segments",
+    "tooltip.promptEditorResize": "Drag vertically to resize the prompt editor; use arrow keys for fine adjustment",
 
     "output.totalDurationSec": "Total duration (sec)",
     "output.resolution": "Output resolution",

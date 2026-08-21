@@ -550,20 +550,27 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0}
 /* Fixed min so progress text wrap does not change node chrome height every tick. */
 .bd-run-status{min-height:52px;box-sizing:border-box}
-/* Solo material group (class set by syncBatchPanelFillHeight): card fills the list. */
+/* Solo material group fills the viewport by default, but may grow beyond it when
+   the user drags the rich prompt editor. The list then scrolls instead of
+   clipping the editor or forcing its height back to auto. */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;max-height:100%;align-self:stretch}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0;height:auto;max-height:100%}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:0;max-height:100%;overflow:hidden}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
-  flex:1 1 auto;min-height:200px;max-height:100%;height:auto!important;overflow:auto
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{
+  display:flex;flex-direction:column;flex:0 0 auto!important;min-height:100%;height:auto!important
 }
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-wrap,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-editor,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-batch-prompts textarea{
-  max-height:100%
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{
+  flex:0 0 auto;min-height:280px;max-height:none;align-self:stretch
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{
+  flex:0 0 auto;min-height:0;height:auto;max-height:none
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{
+  flex:0 0 auto;min-height:140px;max-height:none;overflow:visible
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap{
+  flex:0 0 auto;min-height:120px;max-height:none;height:auto;overflow:visible
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
+  flex:0 0 auto;min-height:120px;max-height:none;height:360px;overflow:auto;resize:vertical
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,

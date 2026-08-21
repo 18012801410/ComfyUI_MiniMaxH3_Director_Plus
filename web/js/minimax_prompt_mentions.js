@@ -49,6 +49,22 @@ const MENTION_STYLES = `
 }
 .bd-token-editor:focus{border-color:#4a7a5a;box-shadow:0 0 0 1px rgba(79,255,143,.18)}
 .bd-token-editor:empty:before{content:attr(data-placeholder);color:#666;pointer-events:none}
+.bd-token-resize-handle{
+  position:absolute;left:50%;bottom:0;z-index:4;width:96px;max-width:40%;height:18px;
+  transform:translateX(-50%);display:flex;align-items:flex-end;justify-content:center;
+  padding:0;border:0;background:transparent;outline:none;border-radius:8px 8px 0 0;
+  cursor:ns-resize;touch-action:none;user-select:none
+}
+.bd-token-resize-handle::after{
+  content:"";width:54px;max-width:72%;height:3px;margin-bottom:3px;border-radius:999px;
+  background:#52665a;box-shadow:0 -4px 0 rgba(82,102,90,.65)
+}
+.bd-token-resize-handle:hover::after,
+.bd-token-resize-handle:focus-visible::after,
+.bd-token-wrap.bd-token-resizing .bd-token-resize-handle::after{
+  background:#4fff8f;box-shadow:0 -4px 0 rgba(79,255,143,.45)
+}
+body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
 .bd-rv2v-layout .bd-token-editor,.bd-v2v-layout .bd-token-editor{
   min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
@@ -556,6 +572,98 @@ function positionMenu(menu, editor) {
     menu.style.top = `${Math.round(top)}px`;
 }
 
+/**
+ * Native CSS resize handles are unreliable inside ComfyUI's transformed canvas.
+ * This explicit grip converts viewport pointer movement back into the editor's
+ * unscaled CSS height, so dragging remains accurate at every canvas zoom level.
+ */
+function installTokenResizeHandle(wrap, editor) {
+    if (!wrap || !editor || wrap.querySelector(":scope > .bd-token-resize-handle")) return;
+
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = "bd-token-resize-handle";
+    handle.dataset.role = "prompt-resize-handle";
+    handle.setAttribute("aria-label", t("tooltip.promptEditorResize"));
+    handle.dataset.i18nTitle = "tooltip.promptEditorResize";
+    handle.title = t("tooltip.promptEditorResize");
+    wrap.appendChild(handle);
+
+    const applyHeight = (height, minHeight = 96) => {
+        const nextHeight = Math.max(minHeight, Math.round(height));
+        editor.style.height = `${nextHeight}px`;
+        wrap.style.height = `${nextHeight}px`;
+    };
+
+    handle.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        event.stopPropagation();
+        const computed = getComputedStyle(editor);
+        const current = Number.parseFloat(computed.height) || editor.offsetHeight || 96;
+        const minHeight = Number.parseFloat(computed.minHeight) || 96;
+        const step = event.shiftKey ? 80 : 24;
+        applyHeight(current + (event.key === "ArrowDown" ? step : -step), minHeight);
+    });
+
+    handle.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+    });
+
+    handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+
+        const computed = getComputedStyle(editor);
+        const rect = editor.getBoundingClientRect();
+        const startHeight = Number.parseFloat(computed.height) || editor.offsetHeight || 96;
+        const minHeight = Number.parseFloat(computed.minHeight) || 96;
+        const scaleY = rect.height > 0 ? rect.height / startHeight : 1;
+        const startY = event.clientY;
+        const pointerId = event.pointerId;
+
+        wrap.classList.add("bd-token-resizing");
+        document.body.classList.add("bd-token-resizing");
+        try {
+            handle.setPointerCapture(pointerId);
+        } catch {
+            /* Window listeners below keep dragging active without pointer capture. */
+        }
+
+        const onMove = (moveEvent) => {
+            if (moveEvent.pointerId !== pointerId) return;
+            moveEvent.preventDefault();
+            moveEvent.stopPropagation();
+            applyHeight(
+                startHeight + (moveEvent.clientY - startY) / Math.max(scaleY, 0.01),
+                minHeight
+            );
+        };
+
+        const stop = (endEvent) => {
+            if (endEvent.pointerId !== pointerId) return;
+            endEvent.preventDefault();
+            endEvent.stopPropagation();
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", stop);
+            window.removeEventListener("pointercancel", stop);
+            wrap.classList.remove("bd-token-resizing");
+            document.body.classList.remove("bd-token-resizing");
+            try {
+                handle.releasePointerCapture(pointerId);
+            } catch {
+                /* Ignore when capture already ended. */
+            }
+        };
+
+        window.addEventListener("pointermove", onMove, { passive: false });
+        window.addEventListener("pointerup", stop);
+        window.addEventListener("pointercancel", stop);
+    });
+}
+
 function ensureTokenShell(textarea) {
     if (textarea.dataset.tokenShell === "1" && textarea.__bdTokenEditor) {
         return textarea.__bdTokenEditor;
@@ -583,6 +691,10 @@ function ensureTokenShell(textarea) {
         editor.classList.add(cls);
     }
     wrap.appendChild(editor);
+    // R2V uses the growable card/list layout; other modes keep their existing flex sizing.
+    if (textarea.closest(".bd-batch-r2v")) {
+        installTokenResizeHandle(wrap, editor);
+    }
     textarea.__bdTokenEditor = editor;
     textarea.__bdTokenWrap = wrap;
 
