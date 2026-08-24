@@ -22,6 +22,61 @@ from .plan import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
+SOURCE_VIDEO_FP_KEY = "source_video"
+
+
+def source_video_identity(plan: DirectorPlan) -> list[str]:
+    """Stable source-clip identity: relative path + size + mtime (overwrite-safe)."""
+    from ..lib.video_io import resolve_video_path, video_clips_from_timeline
+
+    clips = video_clips_from_timeline((plan.raw or {}) if plan is not None else {})
+    tokens: list[str] = []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        rel = str(clip.get("videoFile") or clip.get("fileName") or "").strip().replace("\\", "/")
+        if not rel:
+            continue
+        try:
+            path = resolve_video_path(clip)
+            st = os.stat(path)
+            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+            tokens.append(f"{rel}:{st.st_size}:{mtime_ns}")
+        except Exception:
+            tokens.append(f"{rel}:missing")
+    return tokens
+
+
+def source_identity_changed(stored: Any, expected: dict[str, Any]) -> bool:
+    """True when the current plan has a source video that does not match cache meta.
+
+    Gen timelines (no source clips) never count as a source change, so stale
+    fill/continuity still work after pipeline-only fingerprint churn.
+    """
+    exp = expected.get(SOURCE_VIDEO_FP_KEY) or []
+    if not exp:
+        return False
+    if not isinstance(stored, dict) or SOURCE_VIDEO_FP_KEY not in stored:
+        return True
+    return stored.get(SOURCE_VIDEO_FP_KEY) != exp
+
+
+def _reject_source_stale(
+    stored: Any,
+    expected: dict[str, Any],
+    *,
+    seg_index: int,
+    quiet: bool = False,
+) -> bool:
+    if not source_identity_changed(stored, expected):
+        return False
+    if not quiet:
+        log.info(
+            "Segment %d cache is from a different source video; ignoring stale render.",
+            seg_index + 1,
+        )
+    return True
+
 
 def _cache_root(node_id: str) -> Path | None:
     try:
@@ -69,6 +124,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "ref_videos": ref_video_files,
         "ref_video": ref_video_file,
         "ref_video_start": seg.reference_video_start_frame,
+        SOURCE_VIDEO_FP_KEY: source_video_identity(plan),
         "continuity": plan.continuity_enabled,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
@@ -242,8 +298,9 @@ def load_segment_handoff_meta(
     try:
         expected = segment_cache_fingerprint(seg, plan)
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        if stored != expected and not allow_stale:
-            return None
+        if stored != expected:
+            if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
+                return None
         data = json.loads(handoff_path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except Exception:
@@ -298,8 +355,9 @@ def load_segment_av_latent(
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = segment_cache_fingerprint(seg, plan)
-        if stored != expected and not allow_stale:
-            return None
+        if stored != expected:
+            if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
+                return None
         payload = torch.load(latent_path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict) or "samples" not in payload:
             return None
@@ -325,12 +383,14 @@ def _fingerprint_matches(
     tensor_path = root / f"seg_{seg.index:04d}.pt"
     if not meta_path.is_file():
         return False
-    if allow_stale:
-        # Companion loads (audio/av) may follow a video that was accepted stale.
-        return tensor_path.is_file()
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        return stored == segment_cache_fingerprint(seg, plan)
+        expected = segment_cache_fingerprint(seg, plan)
+        if stored == expected:
+            return True
+        if _reject_source_stale(stored, expected, seg_index=seg.index, quiet=True):
+            return False
+        return bool(allow_stale and tensor_path.is_file())
     except Exception:
         return False
 
@@ -346,7 +406,9 @@ def load_segment_cache(
 
     ``allow_stale=True``: used for「选择运行」+「全部导出」fill of unselected
     segments. Prefer the last render on disk over blank/gray source placeholders
-    when the fingerprint drifted (pipeline bump, minor plan churn).
+    when the fingerprint drifted (pipeline bump, minor plan churn). A different
+    source video is never treated as usable stale — callers then passthrough
+    the current clip (v2v/rv2v) or skip (gen timelines).
     """
     if not node_id:
         return None
@@ -363,6 +425,8 @@ def load_segment_cache(
         if meta_path.is_file():
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
             if stored != expected:
+                if _reject_source_stale(stored, expected, seg_index=idx):
+                    return None
                 diff = _fingerprint_diff_keys(stored, expected)
                 if not allow_stale:
                     log.info(

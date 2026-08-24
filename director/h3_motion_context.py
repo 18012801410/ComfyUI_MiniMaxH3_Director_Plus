@@ -238,13 +238,28 @@ def _audio_tail_from_latent(
     return audio[:1, ..., audio_start:audio_end].clone(), rt, float(overhang)
 
 
+def _usable_context_audio(audio: dict | None) -> dict | None:
+    """Return ``audio`` only when it has a non-empty waveform (resample-safe)."""
+    if not isinstance(audio, dict):
+        return None
+    waveform = audio.get("waveform")
+    if not isinstance(waveform, torch.Tensor) or waveform.numel() <= 0:
+        return None
+    if waveform.ndim < 1 or int(waveform.shape[-1]) <= 0:
+        return None
+    return audio
+
+
 def _encode_tail_audio(audio_vae, audio: dict, seconds: float) -> tuple[torch.Tensor, int]:
     try:
         import torchaudio
     except ImportError:
         torchaudio = None
-    waveform = audio["waveform"]
-    sr = int(audio["sample_rate"])
+    usable = _usable_context_audio(audio)
+    if usable is None:
+        raise ValueError("Director continuity: empty context audio waveform")
+    waveform = usable["waveform"]
+    sr = int(usable.get("sample_rate") or getattr(audio_vae, "audio_sample_rate", 32000) or 32000)
     vae_sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
     if sr != vae_sr:
         if torchaudio is None:
@@ -434,6 +449,11 @@ def apply_motion_context(
     }
     out = node_helpers.conditioning_set_values(positive, values)
 
+    context_audio = _usable_context_audio(context_audio)
+    if continue_audio and pin_audio_latent is None and context_audio is None:
+        log.warning(
+            "Director continuity: previous export audio is empty; pinning video only."
+        )
     if continue_audio and (pin_audio_latent is not None or context_audio is not None):
         # Official: audio window independent; 0 follows video span. Example WF uses 24.
         a_frames = int(audio_ctx) if audio_ctx > 0 else int(span)

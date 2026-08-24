@@ -1037,7 +1037,8 @@ def execute_director_plan_core(
         if plan.export_mode != "all":
             continue
 
-        # Prefer exact cache; fall back to stale disk render (never gray gen canvas).
+        # Prefer exact cache; pipeline-stale disk render is ok. A different
+        # source video is rejected so v2v/rv2v can passthrough the new clip.
         cached = load_segment_cache(node_id, seg, plan)
         used_stale = False
         if cached is None:

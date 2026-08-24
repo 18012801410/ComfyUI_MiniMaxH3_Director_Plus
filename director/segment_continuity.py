@@ -316,8 +316,8 @@ def resolve_prev_segment_output(
     if prev_idx in completed:
         return completed[prev_idx]
     prev_seg = all_segments[prev_idx]
-    # Stale-ok: partial re-run after pipeline/fingerprint churn still needs the
-    # previous render for motion context (better than failing or pinning gray).
+    # Pipeline-stale is ok; a different source video is not (load_segment_cache
+    # refuses source-stale even with allow_stale=True).
     cached = load_segment_cache(node_id, prev_seg, plan, allow_stale=True)
     if cached is not None:
         return cached
@@ -325,8 +325,8 @@ def resolve_prev_segment_output(
         return None
     raise ValueError(
         f"段间连贯：片段 #{seg_index + 1} 需要上一段 #{prev_idx + 1} 的生成结果。"
-        "请先运行上一段，或开启「全部运行」以生成完整序列；"
-        "若使用「选择运行」，请确保上一段已有有效缓存。"
+        "换源后旧缓存已失效。请先运行上一段，或将其纳入「选择运行」；"
+        "也可关闭「段间引导」后只跑本段。"
     )
 
 
