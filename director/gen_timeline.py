@@ -263,6 +263,7 @@ def build_gen_director_plan(
         _resolve_export_mode,
         concat_common_segment_prompt,
         merge_indexed_refs,
+        resolve_ref_image_size,
         segment_ref_audios_for_context,
         segment_refs_for_context,
     )
@@ -475,6 +476,10 @@ def build_gen_director_plan(
                 continuity_from_prev=resolve_segment_continuity_from_prev(
                     seg_data if isinstance(seg_data, dict) else {},
                     segment_index=idx,
+                ),
+                ref_image_size=resolve_ref_image_size(
+                    seg_data if isinstance(seg_data, dict) else {},
+                    timeline,
                 ),
             )
         )

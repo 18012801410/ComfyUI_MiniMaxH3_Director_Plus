@@ -35,6 +35,8 @@ import {
     RESOLUTION_ASPECTS,
     resolutionFromSelector,
     resolveTaskKey,
+    resolveSegmentRefImageSize,
+    normalizeRefImageSize,
     snapResolutionDim,
     sumFrameCounts,
     taskUsesReferenceAudios,
@@ -190,6 +192,7 @@ function normalizeOutputContinuity(output = {}) {
         continuityEnabled: isContinuityEnabled(output),
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
+        refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
 }
 
@@ -643,6 +646,7 @@ const STYLES = `
 .bd-canvas.bd-grab{cursor:grab}
 .bd-canvas.bd-grabbing{cursor:grabbing}
 .bd-output{width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;background:#1e1e1e;border:1px solid #333;border-radius:6px}
+.bd-out-audio-wrap{display:inline-flex;align-items:center;gap:6px}
 .bd-split{display:block;width:100%;box-sizing:border-box;min-width:0}
 .bd-r2v-common-hint{margin:0 0 8px;font-size:11px;line-height:1.4;color:#9ab;opacity:.95}
 .bd-panel.bd-r2v-common-panel{border:1px solid #3a4a5a;background:linear-gradient(180deg,#1a222c 0%,#151a20 100%)}
@@ -715,8 +719,10 @@ const STYLES = `
 .bd-panel{width:100%;box-sizing:border-box;background:#222;border:1px solid #111;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px}
 .bd-panel.bd-rv2v-panel,.bd-panel.bd-v2v-panel{background:linear-gradient(165deg,#1c1c1c 0%,#141414 52%,#111 100%);border:1px solid #2c2c2c;border-radius:12px;padding:12px 14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);gap:10px}
 .bd-panel.bd-rv2v-panel>b,.bd-panel.bd-v2v-panel>b,.bd-seg-head>b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
-.bd-seg-head{display:flex;align-items:baseline;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
+.bd-seg-head{display:flex;align-items:center;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
 .bd-seg-head>b{flex-shrink:0;margin:0}
+.bd-seg-refsize{display:inline-flex;align-items:center;gap:6px;color:#c8c8c8;font-size:11px;white-space:nowrap;margin-left:auto;flex-shrink:0}
+.bd-seg-refsize select{max-width:88px}
 .bd-seg-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
 .bd-seg-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff}
 .bd-seg-head .bd-meta,.bd-panel.bd-v2v-panel .bd-seg-head .bd-meta,.bd-panel.bd-rv2v-panel .bd-seg-head .bd-meta{color:#8a8a8a;font-size:11px;line-height:1.45;padding:0;min-width:0}
@@ -1384,6 +1390,7 @@ function parseTimeline(raw, totalFrames, fps) {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         },
         runSelectEnabled: false,
@@ -1446,6 +1453,7 @@ function parseTimeline(raw, totalFrames, fps) {
             maxExportFrames: data.output?.maxExportFrames ?? data.output?.max_export_frames ?? 0,
             exportMode: data.output?.exportMode ?? data.output?.export_mode ?? "all",
             audioMode: normalizeAudioMode(data.output?.audioMode ?? data.output?.audio_mode),
+            refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
             continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
         });
@@ -1851,6 +1859,7 @@ class MiniMaxH3DirectorEditor {
                     previewB64: matched?.previewB64 || "",
                     previewFrames: matched?.previewFrames || [],
                     previewFps: matched?.previewFps,
+                    refImageSize: matched?.refImageSize ?? matched?.ref_image_size,
                     ...(matched?.runEnabled != null ? { runEnabled: matched.runEnabled } : {}),
                 });
             });
@@ -2077,6 +2086,7 @@ class MiniMaxH3DirectorEditor {
                         genImage: clean.genImage || { imageFile: "" },
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
+                        refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
                     };
                 }),
                 ...this._runSelectionPayload(),
@@ -2478,6 +2488,13 @@ class MiniMaxH3DirectorEditor {
                         <span data-i18n="batch.continuityFromPrev">引用上段</span>
                     </label>
                     <div class="bd-meta" data-r="seg-info"></div>
+                    <label class="bd-seg-refsize hidden" data-r="seg-ref-image-size-wrap" hidden data-i18n-title="tooltip.refImageSize">
+                        <span data-i18n="output.refImageSize.label">参考图尺寸</span>
+                        <select class="bd-select" data-r="seg-ref-image-size">
+                            <option value="match" data-i18n="output.refImageSize.match">match</option>
+                            <option value="max" data-i18n="output.refImageSize.max">max</option>
+                        </select>
+                    </label>
                 </div>
                 <div class="bd-prompt-layout" data-r="seg-prompt-layout">
                     <div class="bd-refs-col" data-r="seg-refs-col">
@@ -2617,6 +2634,8 @@ class MiniMaxH3DirectorEditor {
         this.segLabel = this.root.querySelector('[data-r="seg-label"]');
         this.segContinuityFromPrevWrap = this.root.querySelector('[data-r="seg-continuity-from-prev-wrap"]');
         this.segContinuityFromPrevCb = this.root.querySelector('[data-r="seg-continuity-from-prev"]');
+        this.segRefImageSizeWrap = this.root.querySelector('[data-r="seg-ref-image-size-wrap"]');
+        this.segRefImageSize = this.root.querySelector('[data-r="seg-ref-image-size"]');
         this.segInfo = this.root.querySelector('[data-r="seg-info"]');
         this.segPrompt = this.root.querySelector('[data-r="seg-prompt"]');
         this.segNegative = this.root.querySelector('[data-r="seg-negative"]');
@@ -2865,6 +2884,14 @@ class MiniMaxH3DirectorEditor {
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
         if (this.outAudioMode) {
             this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
+        }
+        if (this.segRefImageSize) {
+            this.segRefImageSize.onchange = () => {
+                const seg = this.timeline.segments?.[this.selectedIndex];
+                if (!seg) return;
+                seg.refImageSize = normalizeRefImageSize(this.segRefImageSize.value);
+                this.commit(true);
+            };
         }
         if (this.segmentContinuityCb) {
             this.segmentContinuityCb.onchange = () => {
@@ -5240,6 +5267,7 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
@@ -5321,6 +5349,7 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
         this.syncSegmentContinuityFromPrevUI();
+        this.syncSegmentRefImageSizeUI();
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
@@ -5338,6 +5367,22 @@ class MiniMaxH3DirectorEditor {
         const seg = this.timeline.segments?.[idx];
         cb.checked = isSegmentContinuityFromPrev(seg, idx);
         wrap.title = t("tooltip.segmentContinuityFromPrev");
+    }
+
+    /** Per-segment ref_image_size for rv2v (r2v uses the group card control). */
+    syncSegmentRefImageSizeUI() {
+        const wrap = this.segRefImageSizeWrap;
+        const sel = this.segRefImageSize;
+        if (!wrap || !sel) return;
+        const show = this.getTaskKey() === "rv2v" && !this.isImageBatch() && !this.isFl2vMode();
+        wrap.classList.toggle("hidden", !show);
+        wrap.hidden = !show;
+        if (!show) return;
+        const seg = this.timeline.segments?.[this.selectedIndex ?? 0];
+        const value = resolveSegmentRefImageSize(seg, this.timeline.output);
+        sel.value = value;
+        if (seg && seg.refImageSize !== value) seg.refImageSize = value;
+        wrap.title = t("tooltip.refImageSize");
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
@@ -5522,6 +5567,7 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         if (key === "aspectRatio") {
@@ -5651,6 +5697,7 @@ class MiniMaxH3DirectorEditor {
             maxExportFrames: prevOut.maxExportFrames ?? 0,
             exportMode: prevOut.exportMode ?? "all",
             audioMode: normalizeAudioMode(prevOut.audioMode),
+            refImageSize: normalizeRefImageSize(prevOut.refImageSize ?? prevOut.ref_image_size),
             continuityEnabled: isContinuityEnabled(prevOut),
             continuityOverlapFrames: snapContinuityFrames(
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
@@ -5682,6 +5729,7 @@ class MiniMaxH3DirectorEditor {
             mode: "long_edge", longEdge: 864, width: 864, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
         };
         if (this.timeline.output.audioMode == null) {
@@ -9100,13 +9148,17 @@ class MiniMaxH3DirectorEditor {
             if (this.genDefaultFc) this.genDefaultFc.value = defFc;
         }
 
-        if (this.usesGlobalRefPanel()) return;
+        if (this.usesGlobalRefPanel()) {
+            this.syncSegmentRefImageSizeUI();
+            return;
+        }
 
         if (!seg) return;
         const liveSeg = (this._previewSegments || this.timeline.segments)?.[this.selectedIndex] || seg;
         const segKey = resolveTaskKey(liveSeg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
         this.syncSegmentContinuityFromPrevUI();
+        this.syncSegmentRefImageSizeUI();
         this._updateSegInfoFromSegment(liveSeg);
         this.segPrompt.value = liveSeg.prompt || "";
         if (taskUsesReferenceImages(segKey)) {

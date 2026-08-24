@@ -40,6 +40,46 @@ MIN_SEGMENT_FRAMES = 4
 DEFAULT_CONTINUITY_OVERLAP = 22
 MIN_CONTINUITY_OVERLAP = 5
 MAX_CONTINUITY_OVERLAP = 56
+REF_IMAGE_SIZE_MATCH = "match"
+REF_IMAGE_SIZE_MAX = "max"
+
+
+def normalize_ref_image_size(value) -> str:
+    raw = str(value or "").strip().lower()
+    return REF_IMAGE_SIZE_MAX if raw == REF_IMAGE_SIZE_MAX else REF_IMAGE_SIZE_MATCH
+
+
+def _timeline_dict(plan_or_timeline) -> dict:
+    if isinstance(plan_or_timeline, dict):
+        return plan_or_timeline
+    raw = getattr(plan_or_timeline, "raw", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _legacy_output_ref_image_size(timeline: dict | None) -> str | None:
+    out = (timeline or {}).get("output") or {}
+    raw = out.get("refImageSize")
+    if raw is None:
+        raw = out.get("ref_image_size")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return normalize_ref_image_size(raw)
+
+
+def resolve_ref_image_size(seg_or_data=None, plan_or_timeline=None) -> str:
+    """Per-segment MiniMax ``ref_image_size``; legacy ``output.refImageSize`` as fallback."""
+    raw = None
+    if isinstance(seg_or_data, dict):
+        if "refImageSize" in seg_or_data or "ref_image_size" in seg_or_data:
+            raw = seg_or_data.get("refImageSize")
+            if raw is None:
+                raw = seg_or_data.get("ref_image_size")
+    elif seg_or_data is not None:
+        raw = getattr(seg_or_data, "ref_image_size", None)
+    if raw is not None and str(raw).strip() != "":
+        return normalize_ref_image_size(raw)
+    legacy = _legacy_output_ref_image_size(_timeline_dict(plan_or_timeline))
+    return legacy if legacy is not None else REF_IMAGE_SIZE_MATCH
 
 
 @dataclass
@@ -113,6 +153,8 @@ class SegmentPlan:
     ui_index: int | None = None
     # Per-segment「引用上段」; master「段间引导」must also be on. Default True.
     continuity_from_prev: bool = True
+    # Official MiniMaxH3ReferenceToVideo combo: match | max. Per r2v/rv2v group.
+    ref_image_size: str = "match"
 
     @property
     def frame_count(self) -> int:
@@ -674,6 +716,10 @@ def build_director_plan(
         seg.continuity_from_prev = resolve_segment_continuity_from_prev(
             seg_data if isinstance(seg_data, dict) else {},
             segment_index=seg.index,
+        )
+        seg.ref_image_size = resolve_ref_image_size(
+            seg_data if isinstance(seg_data, dict) else {},
+            load_timeline,
         )
 
     return DirectorPlan(

@@ -26,6 +26,7 @@ import {
     refAudioLabel,
     refImageLabel,
     refVideoLabel,
+    resolveSegmentRefImageSize,
     resolveTaskKey,
     roundDurationSec,
     sumFrameCounts,
@@ -477,6 +478,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
 .bd-batch-fc input{width:72px;background:#181818;border:1px solid #444;border-radius:5px;color:#eee;padding:5px 8px;font-size:13px}
 .bd-batch-r2v .bd-batch-fc input{width:76px;background:#161616;border-color:#3a3a3a;border-radius:6px;padding:5px 8px;font-size:13px}
+.bd-batch-refsize{display:flex;align-items:center;gap:6px;color:#c8c8c8;font-size:12px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px;white-space:nowrap}
+.bd-batch-refsize select{background:#161616;border:1px solid #3a3a3a;border-radius:6px;color:#eee;padding:5px 6px;font-size:12px;max-width:88px}
 .bd-batch-del{background:transparent;border:1px solid #553;color:#f88;border-radius:4px;padding:3px 8px;font-size:10px;cursor:pointer}
 .bd-batch-r2v .bd-batch-del{border-radius:8px;padding:5px 10px;font-size:11px;border-color:#4a3030;color:#f0a0a0}
 .bd-batch-del:hover{background:#3a1515}
@@ -853,6 +856,9 @@ export function normalizeImageBatchSegments(editor) {
         seg.previewB64 = seg.previewB64 || "";
         seg.previewFrames = seg.previewFrames || [];
         seg.previewFps = seg.previewFps || parseFloat(editor.frameRateWidget?.value || 24);
+        if (taskKey === "r2v") {
+            seg.refImageSize = resolveSegmentRefImageSize(seg, editor.timeline?.output);
+        }
         if (!seg.id) seg.id = newBatchSegment().id;
         start += fc;
     }
@@ -2287,6 +2293,39 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         }
         const meta = document.createElement("div");
         meta.className = "bd-batch-head-meta";
+        if (isR2v) {
+            const sizeRow = document.createElement("label");
+            sizeRow.className = "bd-batch-refsize";
+            sizeRow.title = t("tooltip.refImageSize");
+            const sizeLabel = document.createElement("span");
+            sizeLabel.setAttribute("data-i18n", "output.refImageSize.label");
+            sizeLabel.textContent = t("output.refImageSize.label");
+            const sizeSel = document.createElement("select");
+            sizeSel.className = "bd-select";
+            const curSize = resolveSegmentRefImageSize(seg, editor.timeline?.output);
+            seg.refImageSize = curSize;
+            for (const opt of ["match", "max"]) {
+                const o = document.createElement("option");
+                o.value = opt;
+                o.setAttribute("data-i18n", `output.refImageSize.${opt}`);
+                o.textContent = t(`output.refImageSize.${opt}`);
+                if (opt === curSize) o.selected = true;
+                sizeSel.appendChild(o);
+            }
+            sizeSel.onchange = (e) => {
+                e.stopPropagation();
+                const liveIdx = (editor.timeline.segments || []).findIndex((s) => s?.id && s.id === seg.id);
+                const live = editor.timeline.segments?.[liveIdx >= 0 ? liveIdx : index];
+                if (!live) return;
+                live.refImageSize = resolveSegmentRefImageSize({ refImageSize: sizeSel.value });
+                editor.commit?.(false, { syncTimeline: true });
+                editor.flushTimelineSync?.();
+            };
+            sizeSel.onclick = (e) => e.stopPropagation();
+            sizeRow.appendChild(sizeLabel);
+            sizeRow.appendChild(sizeSel);
+            meta.appendChild(sizeRow);
+        }
         if (isVideo) {
             const secRow = document.createElement("label");
             secRow.className = "bd-batch-fc";

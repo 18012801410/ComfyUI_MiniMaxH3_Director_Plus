@@ -18,7 +18,7 @@ import torch
 import folder_paths
 
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
-from .plan import DirectorPlan, SegmentPlan
+from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
@@ -119,6 +119,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "frame_rate": float(getattr(plan, "frame_rate", 24) or 24),
         "output_mode": plan.output_mode,
         "ref_max": plan.ref_max_size,
+        "ref_image_size": resolve_ref_image_size(seg, plan),
         "refs": ref_files,
         "ref_audios": ref_audio_files,
         "ref_videos": ref_video_files,

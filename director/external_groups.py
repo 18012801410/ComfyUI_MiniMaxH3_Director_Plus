@@ -357,6 +357,7 @@ def build_plan_from_external_groups(
         concat_common_segment_prompt,
         merge_indexed_refs,
         reinforce_r2v_prompt,
+        resolve_ref_image_size,
     )
 
     timeline = _parse_timeline_meta(timeline_data)
@@ -504,6 +505,7 @@ def build_plan_from_external_groups(
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
+                    ref_image_size=resolve_ref_image_size(row, timeline),
                 )
             )
         else:
@@ -577,6 +579,7 @@ def build_plan_from_external_groups(
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
+                    ref_image_size=resolve_ref_image_size(row, timeline),
                 )
             )
 

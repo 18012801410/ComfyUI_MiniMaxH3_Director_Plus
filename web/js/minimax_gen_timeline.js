@@ -368,6 +368,24 @@ export function isSegmentContinuityFromPrev(segOrShot, index) {
     return false;
 }
 
+/** Official MiniMaxH3ReferenceToVideo combo: match | max. Default match. */
+export function normalizeRefImageSize(value) {
+    const raw = String(value || "match").trim().toLowerCase();
+    return raw === "max" ? "max" : "match";
+}
+
+/** Per-group/segment first; `fallback` may be a string or output object. */
+export function resolveSegmentRefImageSize(seg, fallback) {
+    const fromSeg = seg?.refImageSize ?? seg?.ref_image_size;
+    if (fromSeg != null && String(fromSeg).trim() !== "") {
+        return normalizeRefImageSize(fromSeg);
+    }
+    if (fallback && typeof fallback === "object") {
+        return normalizeRefImageSize(fallback.refImageSize ?? fallback.ref_image_size);
+    }
+    return normalizeRefImageSize(fallback);
+}
+
 export function newBatchSegment(overrides = {}) {
     const taskKey = resolveTaskKey(overrides.taskType || overrides.task_type || "");
     const isVideo = isVideoBatchTask(taskKey);
@@ -384,6 +402,9 @@ export function newBatchSegment(overrides = {}) {
         durationSec = resolved.durationSec;
         fc = resolved.frames;
     }
+    const refImageSize = normalizeRefImageSize(
+        overrides.refImageSize ?? overrides.ref_image_size,
+    );
     return {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
         start: 0,
@@ -404,6 +425,7 @@ export function newBatchSegment(overrides = {}) {
         length: fc,
         frameCount: fc,
         ...(isVideo ? { durationSec } : {}),
+        refImageSize,
     };
 }
 

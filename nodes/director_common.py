@@ -123,6 +123,7 @@ def default_timeline_json(
                 "maxExportFrames": 0,
                 "exportMode": "all",
                 "audioMode": "generate",
+                "refImageSize": "match",
             },
             "videoClips": [],
             "video": {
