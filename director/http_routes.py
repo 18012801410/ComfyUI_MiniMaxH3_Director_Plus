@@ -16,6 +16,7 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 CHUNK_ROOT = os.path.join(folder_paths.get_temp_directory(), "minimax_upload_chunks")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".mts", ".ts"}
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
 _WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
 _SAFE_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
@@ -43,7 +44,9 @@ def _get_media_exts(kind: str) -> set[str]:
         return IMAGE_EXTS
     if kind == "video":
         return VIDEO_EXTS
-    raise ValueError("kind must be image or video")
+    if kind == "audio":
+        return AUDIO_EXTS
+    raise ValueError("kind must be image, video or audio")
 
 
 def _list_input_media(kind: str) -> list[dict]:
@@ -63,7 +66,12 @@ def _list_input_media(kind: str) -> list[dict]:
                 stat = os.stat(abs_path)
             except OSError:
                 continue
-            rel_path = os.path.relpath(abs_path, input_dir).replace("\\", "/")
+            try:
+                rel_path = os.path.relpath(abs_path, input_dir).replace("\\", "/")
+            except ValueError:
+                continue
+            if rel_path.startswith(".."):
+                continue
             subfolder = os.path.dirname(rel_path).replace("\\", "/")
             if subfolder == ".":
                 subfolder = ""
