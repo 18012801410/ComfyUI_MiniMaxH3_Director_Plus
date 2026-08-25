@@ -920,6 +920,54 @@ function pickFile(accept, onFile) {
     input.click();
 }
 
+function isBatchImageFile(file) {
+    return !!file && (
+        String(file.type || "").startsWith("image/")
+        || /\.(jpe?g|png|webp|bmp|gif|tiff?)$/i.test(file.name || "")
+    );
+}
+
+function isBatchVideoFile(file) {
+    return !!file && (
+        String(file.type || "").startsWith("video/")
+        || /\.(mp4|mov|webm|mkv|avi|m4v|mpg|mpeg|mts|ts)$/i.test(file.name || "")
+    );
+}
+
+function isBatchAudioFile(file) {
+    return !!file && (
+        String(file.type || "").startsWith("audio/")
+        || /\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(file.name || "")
+    );
+}
+
+function bindOsFileDrop(el, onFiles) {
+    el.addEventListener("dragover", (e) => {
+        const types = [...(e.dataTransfer?.types || [])];
+        if (types.includes("application/x-minimax-ref-slot")) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+    });
+    el.addEventListener("drop", (e) => {
+        const types = [...(e.dataTransfer?.types || [])];
+        if (types.includes("application/x-minimax-ref-slot")) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const files = [...(e.dataTransfer?.files || [])];
+        if (!files.length) return;
+        void onFiles(files, e);
+    });
+}
+
 function applySegSourceImage(editor, index, imageFile, width = 0, height = 0) {
     const segId = editor.timeline.segments[index]?.id;
     const seg = (editor.timeline.segments || []).find((s) => s.id === segId)
@@ -934,32 +982,34 @@ function applySegSourceImage(editor, index, imageFile, width = 0, height = 0) {
     editor.scheduleTimelineSync?.();
 }
 
-async function uploadSegSource(editor, index) {
+async function assignSegSourceFromFile(editor, index, file) {
     const segId = editor.timeline.segments[index]?.id;
-    pickFile("image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif", async (file) => {
+    try {
+        if (!isBatchImageFile(file)) throw new Error("Not an image file");
+        const uploaded = await uploadImage(file);
+        const imageFile = relPath(uploaded);
+        if (!imageFile) throw new Error("Upload returned empty filename");
+        applySegSourceImage(editor, index, imageFile, 0, 0);
         try {
-            if (!file?.type?.startsWith("image/") && !/\.(jpe?g|png|webp|bmp|gif)$/i.test(file.name || "")) {
-                throw new Error("Not an image file");
+            const dims = await readImageDimensions(file);
+            const live = (editor.timeline.segments || []).find((s) => s.id === segId) || editor.timeline.segments[index];
+            if (live?.genImage?.imageFile === imageFile) {
+                live.genImage = { imageFile, width: dims.width, height: dims.height };
+                editor.updateOutputPreview?.();
+                editor.scheduleTimelineSync?.();
             }
-            const uploaded = await uploadImage(file);
-            const imageFile = relPath(uploaded);
-            if (!imageFile) throw new Error("Upload returned empty filename");
-            applySegSourceImage(editor, index, imageFile, 0, 0);
-            try {
-                const dims = await readImageDimensions(file);
-                const live = (editor.timeline.segments || []).find((s) => s.id === segId) || editor.timeline.segments[index];
-                if (live?.genImage?.imageFile === imageFile) {
-                    live.genImage = { imageFile, width: dims.width, height: dims.height };
-                    editor.updateOutputPreview?.();
-                    editor.scheduleTimelineSync?.();
-                }
-            } catch (dimErr) {
-                console.warn("[MiniMax H3Director] batch source dims skipped:", dimErr);
-            }
-        } catch (err) {
-            console.error("[MiniMax H3Director] batch source upload failed:", err);
-            alert(t("upload.alertFailed", { err: err?.message || err }));
+        } catch (dimErr) {
+            console.warn("[MiniMax H3Director] batch source dims skipped:", dimErr);
         }
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch source upload failed:", err);
+        alert(t("upload.alertFailed", { err: err?.message || err }));
+    }
+}
+
+async function uploadSegSource(editor, index) {
+    pickFile("image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif", (file) => {
+        void assignSegSourceFromFile(editor, index, file);
     });
 }
 
@@ -1113,26 +1163,33 @@ function removeSegRef(editor, index, slot) {
     editor.commit();
 }
 
+async function assignSegAudioFromFile(editor, index, slot, file) {
+    if (!isBatchAudioFile(file)) return false;
+    try {
+        const uploaded = await uploadMedia(file);
+        const seg = editor.timeline.segments[index];
+        if (!seg) return false;
+        seg.refAudios = (seg.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        seg.refAudios.push({
+            index: slot,
+            audioFile: relPath(uploaded),
+            fileName: uploaded?.name || file.name,
+            type: "input",
+            subfolder: uploaded?.subfolder || "",
+        });
+        editor.renderImageBatchGroups();
+        editor.commit();
+        return true;
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch audio upload failed:", err);
+        alert(t("upload.refAudioFailed", { err: err?.message || err }));
+        return false;
+    }
+}
+
 async function uploadSegAudio(editor, index, slot) {
-    pickFile("audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac", async (file) => {
-        try {
-            const uploaded = await uploadMedia(file);
-            const seg = editor.timeline.segments[index];
-            if (!seg) return;
-            seg.refAudios = (seg.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-            seg.refAudios.push({
-                index: slot,
-                audioFile: relPath(uploaded),
-                fileName: uploaded?.name || file.name,
-                type: "input",
-                subfolder: uploaded?.subfolder || "",
-            });
-            editor.renderImageBatchGroups();
-            editor.commit();
-        } catch (err) {
-            console.error("[MiniMax H3Director] batch audio upload failed:", err);
-            alert(t("upload.refAudioFailed", { err: err?.message || err }));
-        }
+    pickFile("audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac", (file) => {
+        void assignSegAudioFromFile(editor, index, slot, file);
     });
 }
 
@@ -1144,27 +1201,34 @@ function removeSegAudio(editor, index, slot) {
     editor.commit();
 }
 
+async function assignSegVideoFromFile(editor, index, slot, file) {
+    if (!isBatchVideoFile(file)) return false;
+    try {
+        const uploaded = await uploadMedia(file);
+        const seg = editor.timeline.segments[index];
+        if (!seg) return false;
+        const videoFile = relPath(uploaded);
+        seg.refVideos = (seg.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        seg.refVideos.push({
+            index: slot,
+            videoFile,
+            fileName: uploaded?.name || file.name,
+            type: "input",
+            subfolder: uploaded?.subfolder || "",
+        });
+        editor.renderImageBatchGroups();
+        editor.commit();
+        return true;
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch video upload failed:", err);
+        alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
+        return false;
+    }
+}
+
 async function uploadSegVideo(editor, index, slot) {
-    pickFile("video/*,.mp4,.mov,.webm,.mkv", async (file) => {
-        try {
-            const uploaded = await uploadMedia(file);
-            const seg = editor.timeline.segments[index];
-            if (!seg) return;
-            const videoFile = relPath(uploaded);
-            seg.refVideos = (seg.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-            seg.refVideos.push({
-                index: slot,
-                videoFile,
-                fileName: uploaded?.name || file.name,
-                type: "input",
-                subfolder: uploaded?.subfolder || "",
-            });
-            editor.renderImageBatchGroups();
-            editor.commit();
-        } catch (err) {
-            console.error("[MiniMax H3Director] batch video upload failed:", err);
-            alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
-        }
+    pickFile("video/*,.mp4,.mov,.webm,.mkv", (file) => {
+        void assignSegVideoFromFile(editor, index, slot, file);
     });
 }
 
@@ -1290,6 +1354,35 @@ function nextEmptyGroupSlot(items, offset, slots, hasFn) {
         if (!hasFn(hit)) return abs;
     }
     return -1;
+}
+
+async function dropFilesIntoGroupSlots(editor, index, files, e, {
+    isFile,
+    slotSelector,
+    offset,
+    slots,
+    itemsKey,
+    hasFn,
+    assignFile,
+}) {
+    const matching = files.filter(isFile);
+    if (!matching.length) return;
+    const hit = e.target.closest?.(slotSelector);
+    const hitIndex = hit ? Number(hit.dataset.refIndex) : NaN;
+    const replaceFirst = Number.isFinite(hitIndex) && hitIndex >= offset && hitIndex < offset + slots;
+    for (let i = 0; i < matching.length; i++) {
+        const seg = editor.timeline.segments[index];
+        if (!seg) return;
+        const target = (i === 0 && replaceFirst)
+            ? hitIndex
+            : nextEmptyGroupSlot(seg[itemsKey], offset, slots, hasFn);
+        if (target < 0) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        const ok = await assignFile(editor, index, target, matching[i]);
+        if (!ok) return;
+    }
 }
 
 function createR2vSection(title, countText, { onPickExisting, pickDisabled = false } = {}) {
@@ -1723,6 +1816,17 @@ function appendR2vMediaSections(card, seg, index, editor) {
     );
     const videos = document.createElement("div");
     videos.className = "bd-batch-videos";
+    if (vidSlots > 0) {
+        bindOsFileDrop(videos, (files, e) => dropFilesIntoGroupSlots(editor, index, files, e, {
+            isFile: isBatchVideoFile,
+            slotSelector: ".bd-batch-video",
+            offset: vidOffset,
+            slots: vidSlots,
+            itemsKey: "refVideos",
+            hasFn: _refHasVideo,
+            assignFile: assignSegVideoFromFile,
+        }));
+    }
     if (vidSlots <= 0 && vidOffset > 0) {
         const empty = document.createElement("p");
         empty.className = "bd-r2v-slot-hint";
@@ -1763,6 +1867,17 @@ function appendR2vMediaSections(card, seg, index, editor) {
     );
     const audios = document.createElement("div");
     audios.className = "bd-batch-audios";
+    if (audSlots > 0) {
+        bindOsFileDrop(audios, (files, e) => dropFilesIntoGroupSlots(editor, index, files, e, {
+            isFile: isBatchAudioFile,
+            slotSelector: ".bd-batch-audio",
+            offset: audOffset,
+            slots: audSlots,
+            itemsKey: "refAudios",
+            hasFn: _refHasAudio,
+            assignFile: assignSegAudioFromFile,
+        }));
+    }
     if (audSlots <= 0 && audOffset > 0) {
         const empty = document.createElement("p");
         empty.className = "bd-r2v-slot-hint";
@@ -2397,6 +2512,10 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             src.className = "bd-batch-src";
             renderSourceSlot(src, seg.genImage?.imageFile);
             src.onclick = () => uploadSegSource(editor, index);
+            bindOsFileDrop(src, (files) => {
+                const file = files.find(isBatchImageFile);
+                if (file) void assignSegSourceFromFile(editor, index, file);
+            });
             media.appendChild(src);
             const pickSrc = document.createElement("button");
             pickSrc.type = "button";

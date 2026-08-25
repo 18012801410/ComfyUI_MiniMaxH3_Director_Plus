@@ -3064,7 +3064,7 @@ class MiniMaxH3DirectorEditor {
             if (types.includes("application/x-minimax-ref-slot")) return;
             if (types.includes("application/x-minimax-fl2v-slot")) return;
             if (types.includes("application/x-minimax-fl2v-shot")) return;
-            if (e.target.closest?.(".bd-ref, .bd-batch-ref, .bd-fl2v-slot, .bd-fl2v-shot")) return;
+            if (e.target.closest?.(".bd-ref, .bd-batch-ref, .bd-batch-src, .bd-batch-video, .bd-batch-audio, .bd-batch-videos, .bd-batch-audios, .bd-fl2v-slot, .bd-fl2v-shot")) return;
             const f = e.dataTransfer.files?.[0];
             if (f?.type.startsWith("video/")) this.loadVideoFile(f);
             else if (f?.type.startsWith("image/")) {
