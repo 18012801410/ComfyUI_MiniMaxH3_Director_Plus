@@ -11,7 +11,12 @@ from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_e
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
 from .core_sampling import sample_single_stage
-from .refine_pack import refine_needs_canvas, refine_passes_for, refine_will_sample
+from .refine_pack import (
+    confirm_first_pass_enabled,
+    refine_needs_canvas,
+    refine_passes_for,
+    refine_will_sample,
+)
 from .refine_sampling import apply_segment_refine
 from .frame_align import minimax_align_frame_count, pad_or_trim_frames
 from .audio_export import (
@@ -51,10 +56,12 @@ from .h3_motion_context import (
     trim_export_tail,
 )
 from .segment_cache import (
+    load_first_pass_cache,
     load_segment_audio,
     load_segment_av_latent,
     load_segment_cache,
     load_segment_handoff_meta,
+    save_first_pass_cache,
     save_segment_cache,
 )
 from .segment_mp4_export import (
@@ -263,6 +270,13 @@ def execute_director_plan_core(
     list[torch.Tensor],
 ]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
+    plan.sample_seed = int(seed)
+    plan.sample_cfg = float(cfg)
+    plan.sample_steps = int(steps)
+    plan.sample_sampler = str(sampler or "")
+    plan.sample_scheduler = str(scheduler or "")
+    plan.sample_shift_video = float(shift_video)
+    plan.sample_shift_audio = float(shift_audio)
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
     # UI toggle on the player bar (timeline.liveTaePreview); default on.
@@ -368,6 +382,15 @@ def execute_director_plan_core(
             )
 
         ui_idx = seg.timeline_index
+        will_refine = refine_will_sample(plan, seg)
+        confirm_first = confirm_first_pass_enabled(plan)
+        pre_cache = (
+            load_first_pass_cache(node_id, seg, plan)
+            if confirm_first and will_refine
+            else None
+        )
+        skip_first_sample = pre_cache is not None
+        hold_after_first = confirm_first and will_refine and not skip_first_sample
         meta = {
             "frames_label": frames_label(seg),
             "task_key": seg.task_key,
@@ -534,6 +557,9 @@ def execute_director_plan_core(
             and not i2v_new_anchor
             and (prev_av is not None or prev_tail is not None)
         )
+        if skip_first_sample:
+            # Cached first-pass latent already has its original pin; don't rebuild MC.
+            use_motion_context = False
         # OFF → context_n=0 → sample_len == official segment length only.
         context_n = snap_context_frames(plan.continuity_overlap_frames) if use_motion_context else 0
         sample_len, _planned_trim = generation_frame_budget(num_frames, context_n)
@@ -782,55 +808,88 @@ def execute_director_plan_core(
             except Exception as exc:
                 log.debug("Live TAE preview skipped: %s", exc)
 
-        samples = sample_single_stage(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent=latent,
-            seed=seed,
-            cfg=cfg,
-            steps=steps,
-            sampler_name=sampler,
-            scheduler=scheduler,
-            shift_video=shift_video,
-            shift_audio=shift_audio,
-            on_phase=_report_sample_phase,
-            on_step_preview=_report_step_preview if live_tae_preview else None,
-            preview_every=1,
-        )
+        if skip_first_sample:
+            samples = pre_cache["av_latent"]
+            cached_h = pre_cache.get("handoff") or {}
+            trim_frames = int(cached_h.get("trim_frames") or 0)
+            cached_sample = int(cached_h.get("sample_frames") or 0)
+            if cached_sample > 0:
+                sample_len = cached_sample
+            reports.append(
+                f"Segment {ui_idx + 1}/{timeline_seg_total}: 命中一采缓存 "
+                f"(seed={int(getattr(plan, 'sample_seed', seed) or seed)})，跳过一采，开始二采"
+            )
+        else:
+            samples = sample_single_stage(
+                model=model,
+                positive=positive,
+                negative=negative,
+                latent=latent,
+                seed=seed,
+                cfg=cfg,
+                steps=steps,
+                sampler_name=sampler,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                on_phase=_report_sample_phase,
+                on_step_preview=_report_step_preview if live_tae_preview else None,
+                preview_every=1,
+            )
 
+        first_pass_samples = samples
         first_pass_gpu = None
         pre_export = None
-        will_refine = refine_will_sample(plan, seg)
+        run_refine = will_refine and not hold_after_first
         if will_refine:
-            try:
-                report_director_progress(
-                    node_id, segment_index=progress_index, segment_total=seg_total,
-                    phase="decode", phase_value=0, phase_max=1, **meta,
-                )
-                first_pass_gpu, _ = _decode_av_latent(
-                    samples, vae, audio_vae, decode_audio=False,
-                )
-                pre_export = first_pass_gpu.detach().cpu().float()
-            except Exception as exc:
-                log.warning(
-                    "Segment %s first-pass decode for images_pre_refine failed (%s).",
-                    ui_idx + 1,
-                    exc,
-                )
-                first_pass_gpu = None
-                pre_export = None
+            cached_frames = pre_cache.get("frames") if skip_first_sample else None
+            if isinstance(cached_frames, torch.Tensor) and cached_frames.numel() > 0:
+                pre_export = cached_frames.detach().cpu().float()
+                if run_refine and isinstance(getattr(plan, "refine", None), dict) and refine_needs_canvas(plan.refine):
+                    first_pass_gpu = pre_export
+            else:
+                try:
+                    report_director_progress(
+                        node_id, segment_index=progress_index, segment_total=seg_total,
+                        phase="decode", phase_value=0, phase_max=1, **meta,
+                    )
+                    first_pass_gpu, _ = _decode_av_latent(
+                        samples, vae, audio_vae, decode_audio=False,
+                    )
+                    pre_export = first_pass_gpu.detach().cpu().float()
+                except Exception as exc:
+                    log.warning(
+                        "Segment %s first-pass decode for images_pre_refine failed (%s).",
+                        ui_idx + 1,
+                        exc,
+                    )
+                    first_pass_gpu = None
+                    pre_export = None
 
         pack = getattr(plan, "refine", None)
         upscale_frames = (
             first_pass_gpu
-            if isinstance(pack, dict) and refine_needs_canvas(pack)
+            if run_refine and isinstance(pack, dict) and refine_needs_canvas(pack)
             else None
         )
         if first_pass_gpu is not None and upscale_frames is None:
             del first_pass_gpu
             first_pass_gpu = None
         export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        if will_refine and not skip_first_sample:
+            save_first_pass_cache(
+                node_id,
+                seg,
+                plan,
+                av_latent=first_pass_samples,
+                frames=pre_export,
+                handoff={
+                    "trim_frames": int(trim_frames),
+                    "export_frames": int(export_len),
+                    "sample_frames": int(sample_len),
+                    "official_mc_length": False,
+                },
+            )
         pass_clips: list[tuple[str, torch.Tensor]] = []
 
         def _export_refine_pass(pass_i: int, n_passes: int, latent: dict) -> None:
@@ -876,28 +935,37 @@ def execute_director_plan_core(
                     exc,
                 )
 
-        samples, refine_note = apply_segment_refine(
-            plan,
-            seg,
-            samples=samples,
-            model=model,
-            vae=vae,
-            audio_vae=audio_vae,
-            positive=positive,
-            negative=negative,
-            seed=seed,
-            cfg=cfg,
-            first_steps=steps,
-            sampler_name=sampler,
-            scheduler=scheduler,
-            shift_video=shift_video,
-            shift_audio=shift_audio,
-            on_phase=_report_sample_phase,
-            on_step_preview=_report_step_preview if live_tae_preview else None,
-            first_pass_images=upscale_frames,
-            trim_frames=trim_frames,
-            on_pass=_export_refine_pass if mp4_run_dir is not None else None,
-        )
+        if run_refine:
+            samples, refine_note = apply_segment_refine(
+                plan,
+                seg,
+                samples=samples,
+                model=model,
+                vae=vae,
+                audio_vae=audio_vae,
+                positive=positive,
+                negative=negative,
+                seed=seed,
+                cfg=cfg,
+                first_steps=steps,
+                sampler_name=sampler,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                on_phase=_report_sample_phase,
+                on_step_preview=_report_step_preview if live_tae_preview else None,
+                first_pass_images=upscale_frames,
+                trim_frames=trim_frames,
+                on_pass=_export_refine_pass if mp4_run_dir is not None else None,
+            )
+        elif hold_after_first:
+            refine_note = (
+                f"先确认一采（已缓存 seed={int(getattr(plan, 'sample_seed', seed) or seed)}，未二采；"
+                "用同一 seed 再 Queue 将只跑二采）"
+            )
+        else:
+            refine_note = ""
+        samples = first_pass_samples if not run_refine else samples
         del upscale_frames
         if first_pass_gpu is not None:
             del first_pass_gpu
@@ -938,6 +1006,8 @@ def execute_director_plan_core(
             pre_chunk = pre_export.cpu().float()
         else:
             pre_chunk = chunk
+        if hold_after_first and pre_chunk is chunk:
+            pre_chunk = chunk.clone()
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(chunk.shape[0]),
@@ -972,7 +1042,7 @@ def execute_director_plan_core(
             audio_dict if isinstance(audio_dict, dict) else None,
             pre_frames=pre_chunk,
         )
-        n_refine = refine_passes_for(getattr(plan, "refine", None)) if will_refine else 1
+        n_refine = refine_passes_for(getattr(plan, "refine", None)) if run_refine else 1
         if isinstance(pack, dict) and (pack.get("mode") or "") == "latent_upscale":
             n_refine = 1
         if n_refine > 1:

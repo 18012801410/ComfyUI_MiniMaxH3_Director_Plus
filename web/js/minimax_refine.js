@@ -128,6 +128,7 @@ function orderRefineWidgets(node) {
         "width",
         "height",
         "skip_fl2v",
+        "confirm_first_pass",
     ];
     const byName = new Map(widgets.map((w) => [w.name, w]));
     const ordered = [];
