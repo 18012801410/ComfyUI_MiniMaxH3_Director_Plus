@@ -1,6 +1,6 @@
 ﻿/**
  * First/last-frame (fl2v) timeline — explicit shot groups.
- * Each shot = { startImage and/or endImage (official allows end-only), durationSec }.
+ * Each shot = { startImage and/or endImage (neither = t2v; official allows end-only), durationSec }.
  * Total duration = sum of shot durations. Timeline shows one block per shot.
  */
 
@@ -1122,7 +1122,9 @@ function renderFl2vShotCards(editor) {
             ? t("fl2v.badge.startEnd")
             : (shot.endImage?.imageFile && !shot.startImage?.imageFile
                 ? t("fl2v.badge.endOnly")
-                : t("fl2v.badge.i2v"));
+                : (shot.startImage?.imageFile
+                    ? t("fl2v.badge.i2v")
+                    : t("fl2v.badge.t2v")));
         const masterCont = isContinuityMasterEnabled(editor.timeline?.output);
         const showCont = masterCont && i > 0 && (shots.length >= 2);
         const contChecked = isSegmentContinuityFromPrev(shot, i);
@@ -1409,7 +1411,7 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
         ctx.font = "12px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(t("canvas.noStartFrame"), startX + pxWidth / 2, y0 + h / 2);
+        ctx.fillText(t("canvas.fl2vT2v"), startX + pxWidth / 2, y0 + h / 2);
         ctx.restore();
         return;
     }

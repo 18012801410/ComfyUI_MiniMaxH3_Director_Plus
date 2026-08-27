@@ -17,7 +17,7 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 |---------|-------------|
 | **Multi-segment timeline** | Upload video in-node; split, equal-split, smart shot-split (PySceneDetect), append; selectable/deletable split points; visual timeline with thumbs |
 | **Task modes** | `t2v`, `i2v`, `fl2v` (first/last frame), `r2v` (reference material groups), `v2v` (video-to-video), `rv2v` (reference-guided source edit) |
-| **First/last frame (fl2v)** | Dedicated shot groups: add group → start and/or end frame (official FL2VA allows end-only); drag edges for duration; run-select per group |
+| **First/last frame (fl2v)** | Dedicated shot groups: prompt-only (text-to-video), or start and/or end (official FL2VA allows end-only). With segment continuity + From prev, an empty shot pins the previous tail (N context frames) for motion/audio handoff; drag edges for duration; run-select per group |
 | **Reference groups (r2v)** | fl2v-style groups: top **Common params** share refs/audio and a common prompt (concatenated with each group prompt); each group may add images 1–9 / audios 1–3 / videos 1–3; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
 | **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
 | **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
@@ -117,9 +117,10 @@ This repo ships examples under `example_workflows/`:
 ### First/last frame (fl2v) — short guide
 
 1. Set task type to **First/Last Frame to Video (fl2v)**
-2. Click **Add group**, upload start and/or end frame (end-only is allowed)
-3. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
-4. Queue; with multiple groups, use **Run select** to sample only some of them
+2. Click **Add group**: prompt-only (text-to-video), or upload start and/or end (end-only OK; start-only = i2v)
+3. With multiple groups, turn on **Segment continuity** and check **From prev** — an empty shot pins the previous tail (N context frames, default 22)
+4. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
+5. Queue; with multiple groups, use **Run select** to sample only some of them
 
 ### Reference groups (r2v) — short guide
 
