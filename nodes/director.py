@@ -156,8 +156,14 @@ class MiniMaxH3Director:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
+    def IS_CHANGED(cls, unique_id=None, **kwargs):
+        # Do not return NaN: that would re-run every Director queue even when
+        # confirm_first_pass is off. Linked Refine is None here, so fingerprint
+        # the .pre cache files that only the confirmation hold writes.
+        del kwargs
+        from ..director.segment_cache import first_pass_cache_disk_signature
+
+        return first_pass_cache_disk_signature(unique_id)
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
     RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")

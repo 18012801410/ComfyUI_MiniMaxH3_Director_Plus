@@ -676,6 +676,31 @@ def prune_segment_cache(node_id: str | None, valid_indices) -> None:
         log.debug("Segment cache prune skipped (%s).", exc)
 
 
+def first_pass_cache_disk_signature(node_id: str | None) -> str:
+    """Fingerprint confirm-first-pass ``*.pre.*`` files without creating the cache dir.
+
+    Director ``IS_CHANGED`` cannot see the linked Refine pack (ComfyUI only
+    forwards widgets). These ``.pre`` files are written only by the confirmation
+    hold, so a second Queue observes a new signature and continues into refine.
+    """
+    if not node_id:
+        return ""
+    root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    if not root.is_dir():
+        return ""
+    parts: list[str] = []
+    try:
+        for path in sorted(root.glob("seg_*.pre.*")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            parts.append(f"{path.name}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
+    except OSError:
+        return ""
+    return "|".join(parts)
+
+
 def inspect_first_pass_cache(
     node_id: str | None,
     plan: DirectorPlan,
