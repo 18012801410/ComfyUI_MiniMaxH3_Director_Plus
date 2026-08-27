@@ -96,7 +96,7 @@ import {
     updateFl2vDetailUI,
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
-import { mountPromptImageMentions, refreshPromptTokenEditors } from "./minimax_prompt_mentions.js";
+import { mountPromptImageMentions, refreshPromptTokenEditors, teardownPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     applyI18nDom,
     aspectDisplayLabel,
@@ -3283,6 +3283,14 @@ class MiniMaxH3DirectorEditor {
         this._unsubLocale?.();
         this._unsubLocale = null;
         this._closeBdModal();
+        teardownPromptImageMentions(this.root);
+        this._clearPreviewVideos(true);
+        this._previewVideos?.clear();
+        try {
+            this._previewVideo?.pause();
+            this._previewVideo?.removeAttribute("src");
+            this._previewVideo?.load();
+        } catch { /* ignore */ }
         this._previewVideo?.remove();
         this._previewVideo = null;
         window.removeEventListener("mousemove", this._onMouseMove);

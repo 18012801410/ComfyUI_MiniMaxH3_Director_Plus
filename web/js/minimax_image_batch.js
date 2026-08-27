@@ -33,7 +33,7 @@ import {
     fileForComfyUpload,
     safeUploadFilename,
 } from "./minimax_gen_timeline.js";
-import { refreshPromptTokenEditors, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
+import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -2316,6 +2316,7 @@ export function renderImageBatchGroups(editor) {
         addBtn.disabled = externalLocked;
     }
 
+    teardownPromptImageMentions(list);
     list.innerHTML = "";
     const ctx = { key, variant, isVideo, runningIdx, fps, externalLocked };
     const segs = editor.timeline.segments || [];

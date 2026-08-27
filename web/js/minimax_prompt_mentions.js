@@ -1038,29 +1038,59 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         refreshTokenStates(rich, getMedia);
     });
 
-    document.addEventListener("mousedown", (e) => {
+    // document/window listeners outlive the textarea. Batch cards rebuild with
+    // innerHTML, so unnamed handlers would accumulate and pin the whole editor.
+    const onDocMouseDown = (e) => {
         if (!menu || menu.classList.contains("hidden")) return;
         if (e.target === rich || rich.contains?.(e.target) || menu.contains(e.target)) return;
         closeMenu();
-    });
-
-    // Capture scroll closes the menu when the page/list moves — but must ignore
-    // scrolls inside the menu itself (overflow:auto), otherwise hovering/dragging
-    // the scrollbar instantly dismisses it.
-    window.addEventListener("scroll", (e) => {
+    };
+    const onWinScroll = (e) => {
         if (!menu || menu.classList.contains("hidden")) return;
         const t = e.target;
         if (t === menu || menu.contains(t)) return;
         closeMenu();
-    }, true);
+    };
+
+    document.addEventListener("mousedown", onDocMouseDown);
+    // Capture: close when the page/list moves, but ignore scrolls inside the menu.
+    window.addEventListener("scroll", onWinScroll, true);
     window.addEventListener("resize", closeMenu);
+
+    let tornDown = false;
+    const teardown = () => {
+        if (tornDown) return;
+        tornDown = true;
+        clearTimeout(rehydrateTimer);
+        document.removeEventListener("mousedown", onDocMouseDown);
+        window.removeEventListener("scroll", onWinScroll, true);
+        window.removeEventListener("resize", closeMenu);
+        menu?.remove();
+        menu = null;
+        textarea.__bdTokenPlaceholderObserver?.disconnect();
+        delete textarea.__bdTokenPlaceholderObserver;
+        delete textarea.dataset.mentionWired;
+        delete textarea.__bdTokenApi;
+    };
 
     textarea.__bdTokenApi = {
         hydrateFromValue,
         refreshMedia: () => refreshTokenStates(rich, getMedia),
         editor: rich,
         sync: () => syncToTextarea({ emitInput: false }),
+        teardown,
     };
+}
+
+/**
+ * Drop document/window listeners, body menus, and observers for token editors
+ * under ``root``. Call before wiping a list with innerHTML, and on editor destroy.
+ */
+export function teardownPromptImageMentions(root = document) {
+    const areas = root?.querySelectorAll?.("textarea.bd-token-source") || [];
+    for (const ta of areas) {
+        ta.__bdTokenApi?.teardown?.();
+    }
 }
 
 /** Refresh chip missing/thumb state after refs change (optional call sites). */
