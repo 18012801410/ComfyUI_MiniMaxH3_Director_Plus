@@ -61,6 +61,7 @@ from .segment_cache import (
     load_segment_av_latent,
     load_segment_cache,
     load_segment_handoff_meta,
+    prune_segment_cache,
     save_first_pass_cache,
     save_segment_cache,
 )
@@ -284,6 +285,9 @@ def execute_director_plan_core(
     live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
 
     all_segments = plan.segments
+    # Drop caches for deleted/shortened timelines. Use every segment index (not
+    # run_indices): unselected「选择运行」slots still fill merge/export from disk.
+    prune_segment_cache(node_id, [seg.index for seg in all_segments])
     # Strictly honor「选择运行」— never force-sample unselected segments.
     run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
 

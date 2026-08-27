@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -214,6 +215,23 @@ def _audio_payload_to_cpu(audio: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 
+def _frames_to_disk(tensor: torch.Tensor) -> torch.Tensor:
+    """Store pixel frames as uint8 [0,255]. Export is 8-bit anyway; float32 is 4× larger."""
+    x = tensor.detach().cpu()
+    if x.dtype == torch.uint8:
+        return x.contiguous()
+    return x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8).contiguous()
+
+
+def _frames_from_disk(loaded: Any) -> torch.Tensor | None:
+    """Restore uint8 cache to float32 [0,1]; pass through legacy float caches."""
+    if not isinstance(loaded, torch.Tensor):
+        return None
+    if loaded.dtype == torch.uint8:
+        return loaded.float().div(255.0)
+    return loaded.float()
+
+
 def save_segment_cache(
     node_id: str | None,
     seg: SegmentPlan,
@@ -246,7 +264,7 @@ def save_segment_cache(
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
     audio_path = root / f"seg_{idx:04d}.audio.pt"
     try:
-        payload = tensor.cpu().float().contiguous()
+        payload = _frames_to_disk(tensor)
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
         text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(
@@ -472,7 +490,9 @@ def load_segment_cache(
                 "Segment %d: using cache without meta for export fill.",
                 idx + 1,
             )
-        return torch.load(tensor_path, map_location="cpu", weights_only=True)
+        return _frames_from_disk(
+            torch.load(tensor_path, map_location="cpu", weights_only=True)
+        )
     except Exception as exc:
         log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
         return None
@@ -547,7 +567,7 @@ def save_first_pass_cache(
                 ),
             )
         if isinstance(frames, torch.Tensor) and frames.numel() > 0:
-            payload = frames.detach().cpu().float().contiguous()
+            payload = _frames_to_disk(frames)
             _write_via_temp(frames_path, lambda p: torch.save(payload, p))
         log.debug(
             "Cached first-pass segment %d for node %s (seed=%s)",
@@ -606,7 +626,7 @@ def load_first_pass_cache(
             try:
                 loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
                 if isinstance(loaded, torch.Tensor) and loaded.numel() > 0:
-                    frames = loaded.float()
+                    frames = _frames_from_disk(loaded)
             except Exception as exc:
                 log.debug("Segment %d first-pass frames skipped: %s", idx + 1, exc)
         handoff: dict[str, Any] = {}
@@ -621,3 +641,36 @@ def load_first_pass_cache(
     except Exception as exc:
         log.warning("Failed to load segment %d first-pass cache: %s", idx + 1, exc)
         return None
+
+
+_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)\.")
+
+
+def prune_segment_cache(node_id: str | None, valid_indices) -> None:
+    """Remove ``seg_XXXX.*`` files whose index is no longer on the timeline.
+
+    Does not create the cache dir. Uses all current segment indices (not
+    「选择运行」), so unselected slots keep merge/export fill. Never raises.
+    """
+    if not node_id:
+        return
+    try:
+        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+        if not root.is_dir():
+            return
+        valid = {int(i) for i in valid_indices}
+        removed = 0
+        for path in root.iterdir():
+            if not path.is_file():
+                continue
+            m = _SEG_CACHE_FILE_RE.match(path.name)
+            if not m or int(m.group(1)) in valid:
+                continue
+            if _safe_unlink(path):
+                removed += 1
+        if removed:
+            log.info(
+                "Segment cache pruned %d stale file(s) for node %s.", removed, node_id
+            )
+    except Exception as exc:
+        log.debug("Segment cache prune skipped (%s).", exc)
