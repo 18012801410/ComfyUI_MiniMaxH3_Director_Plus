@@ -56,7 +56,6 @@ import {
     getImageBatchUiHeight,
     isBatchDetailSolo,
     listCommonImageRefs,
-    listCommonVideoRefs,
     mountImageBatchPanel,
     flushBatchPromptInputs,
     normalizeImageBatchSegments,
@@ -6637,72 +6636,6 @@ class MiniMaxH3DirectorEditor {
         }
     }
 
-    _captureReplaceVideoState() {
-        const live = {
-            segments: cloneJson(this.timeline.segments || [], []),
-            totalFrames: Math.max(1, Number(this.getTotalFrames()) || 1),
-            selectedIndex: this.selectedIndex,
-            currentFrame: this.currentFrame,
-            editMode: this.timeline.editMode || "global",
-            runSelectEnabled: !!this.timeline.runSelectEnabled,
-            runSelection: Array.isArray(this.timeline.runSelection)
-                ? [...this.timeline.runSelection]
-                : [],
-        };
-        if (live.segments.length) return live;
-        return cloneJson(this._videoReplacementDraft, live);
-    }
-
-    _restoreSegmentsAfterVideoReplace(previous, totalFrames, clipId) {
-        const oldSegments = Array.isArray(previous?.segments) ? previous.segments : [];
-        const newTotal = Math.max(1, Number(totalFrames) || 1);
-        const oldTotal = Math.max(1, Number(previous?.totalFrames) || 1);
-        if (!oldSegments.length) {
-            this._setSingleSegment(newTotal);
-            return;
-        }
-
-        const ordered = [...oldSegments].sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
-        const mapped = [];
-        for (let index = 0; index < ordered.length; index++) {
-            const old = sanitizeSegmentForPayload(ordered[index]) || {};
-            const oldStart = Math.max(0, Number(old.start) || 0);
-            const oldEnd = Math.max(oldStart + 1, oldStart + Math.max(1, Number(old.length) || 1));
-            const start = index === 0
-                ? 0
-                : Math.min(newTotal - 1, Math.round((oldStart / oldTotal) * newTotal));
-            const end = index === ordered.length - 1
-                ? newTotal
-                : Math.max(start + 1, Math.min(newTotal, Math.round((oldEnd / oldTotal) * newTotal)));
-            if (start >= newTotal) continue;
-            mapped.push({
-                ...old,
-                id: old.id || uid(),
-                start,
-                length: Math.max(1, end - start),
-                videoClipId: clipId,
-            });
-        }
-        this.timeline.segments = mapped.length ? mapped : [{
-            id: uid(), start: 0, length: newTotal, prompt: "", taskType: "", refs: [],
-            refAudios: [], refVideos: [], referenceVideo: {}, videoClipId: clipId,
-        }];
-        this.timeline.editMode = previous?.editMode || this.timeline.editMode || "global";
-        this.timeline.runSelectEnabled = !!previous?.runSelectEnabled;
-        this.timeline.runSelection = Array.isArray(previous?.runSelection)
-            ? previous.runSelection.filter((i) => Number(i) >= 0 && Number(i) < this.timeline.segments.length)
-            : [];
-        this.selectedIndex = clamp(
-            Number(previous?.selectedIndex) || 0,
-            0,
-            Math.max(0, this.timeline.segments.length - 1),
-        );
-        const progress = Math.max(0, Number(previous?.currentFrame) || 0) / oldTotal;
-        this.currentFrame = clamp(Math.round(progress * newTotal), 0, Math.max(0, newTotal - 1));
-        this.normalizeSegments();
-        this._videoReplacementDraft = null;
-    }
-
     _setSingleSegment(totalFrames) {
         const total = Math.max(0, totalFrames);
         this.timeline.segments = total > 0
@@ -6802,14 +6735,12 @@ class MiniMaxH3DirectorEditor {
             if (btn) { btn.disabled = true; btn.textContent = t("common.analyzing"); }
             this.videoNameEl.textContent = t("upload.inProgress", { name: picked.fileName || picked.relPath });
             try {
-                const previous = this._captureReplaceVideoState();
                 await this._applyLoadedVideo({
                     fileName: picked.fileName || picked.relPath,
                     relPath: picked.relPath,
                     subfolder: picked.subfolder || "",
                     type: picked.type || "input",
                     statusPrefix: t("parse.prefix"),
-                    previous,
                 });
             } catch (err) {
                 console.error("[MiniMax H3Director] video load failed:", err);
@@ -6886,16 +6817,12 @@ class MiniMaxH3DirectorEditor {
                 });
             });
             const relPath = videoRelativePath(uploaded);
-            // Snapshot immediately before applying, so prompt edits made while a
-            // large file was uploading are preserved too.
-            const previous = this._captureReplaceVideoState();
             await this._applyLoadedVideo({
                 fileName: file.name,
                 relPath,
                 subfolder: uploaded.subfolder || "",
                 type: uploaded.type || "input",
                 statusPrefix: t("parse.prefix"),
-                previous,
             });
         } catch (err) {
             console.error("[MiniMax H3Director] video load failed:", err);
@@ -7586,7 +7513,7 @@ class MiniMaxH3DirectorEditor {
         if (map.length) this.timeline.totalFrames = map.length;
     }
 
-    async _applyLoadedVideo({ fileName, relPath, subfolder, type, statusPrefix, previous = null }) {
+    async _applyLoadedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
         const prep = await this._prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix });
         const { totalFrames, store, viewUrl } = prep;
 
@@ -7597,7 +7524,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.videoClips = [clip];
         this.setSparseVideoFrames(totalFrames);
         this._syncPrimaryVideoFromClips([]);
-        this._restoreSegmentsAfterVideoReplace(previous, totalFrames, clip.id);
+        this._setSingleSegment(totalFrames);
 
         this._clearPreviewVideos(true);
         this._previewVideo = this._getPreviewVideoForClip(0);
@@ -7610,6 +7537,8 @@ class MiniMaxH3DirectorEditor {
             this.stageVideo.removeAttribute("src");
             this.stageVideo.load();
         }
+        this.currentFrame = 0;
+
         if (this.totalFramesWidget) this.totalFramesWidget.value = totalFrames;
         this.syncOutputUIFromTimeline();
         this.updateVideoNameLabel();
@@ -8464,13 +8393,6 @@ class MiniMaxH3DirectorEditor {
             this._reorderFromRank = -1;
             this.canvas.classList.remove("bd-grabbing");
             this.canvas.style.cursor = "";
-        } else if (this._drag?.kind === "segment-pending") {
-            const pendingIndex = this._drag.index;
-            this.seekBar.value = this.currentFrame;
-            this.scheduleRender();
-            if (this.isR2vBatch()) {
-                queueMicrotask(() => this._openEmptyR2vGroupSlot(pendingIndex));
-            }
         } else if (this._drag) {
             this.seekBar.value = this.currentFrame;
             this.scheduleRender();
@@ -8527,19 +8449,6 @@ class MiniMaxH3DirectorEditor {
         this._syncStagePreview(this.currentFrame, { force: true });
         this.updateVideoNameLabel();
         return true;
-    }
-
-    _openEmptyR2vGroupSlot(index) {
-        const seg = this.timeline.segments?.[index];
-        if (!seg || (seg.refs || []).some((ref) => ref?.imageFile)
-            || (seg.refVideos || []).some((ref) => ref?.videoFile)) return;
-        const card = this.batchList?.querySelector?.(`.bd-batch-card[data-batch-index="${index}"]`);
-        if (!card) return;
-        card.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
-        const slot = card.querySelector(
-            ".bd-batch-ref:not(.has-img):not(.bd-r2v-pic-hidden), .bd-batch-video:not(.has-video)",
-        );
-        slot?.click?.();
     }
 
     addSplitAtMouse(e) {
@@ -8871,9 +8780,6 @@ class MiniMaxH3DirectorEditor {
 
         const start = Math.max(0, parseInt(seg.start, 10) || 0);
         const len = Math.max(0, parseInt(seg.length, 10) || 0);
-        if (len >= this.getTotalFrames()) {
-            this._videoReplacementDraft = this._captureReplaceVideoState();
-        }
         this.selectedSplitFrame = null;
 
         // Remove segment UI entry first, then cut matching frames from the
@@ -8984,78 +8890,75 @@ class MiniMaxH3DirectorEditor {
         if (this.isR2vBatch()) {
             ctx.fillStyle = "#0d0d0d";
             ctx.fillRect(startX, y0 + 1, pxWidth, h - 2);
-            const refs = [...listCommonImageRefs(this), ...(seg.refs || [])].sort(
+            const refs = [...(seg.refs || [])].sort(
                 (a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0),
             );
-            const videos = [...listCommonVideoRefs(this), ...(seg.refVideos || [])].sort(
-                (a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0),
-            );
+            const commonRefs = listCommonImageRefs(this);
+            const imgFile = refs.find((r) => r?.imageFile)?.imageFile
+                || commonRefs.find((r) => r?.imageFile)?.imageFile
+                || "";
             const previewB64 = seg.previewB64 || (Array.isArray(seg.previewFrames) ? seg.previewFrames[0] : "");
-            const media = [
-                ...refs.filter((ref) => ref?.imageFile).map((ref) => ({
-                    key: `r2v:${ref.imageFile}`,
-                    kind: "image",
-                    path: ref.imageFile,
-                })),
-                ...videos.filter((ref) => ref?.videoFile || ref?.previewImageFile || ref?.previewImageUrl).map((ref) => ({
-                    key: ref.videoFile
-                        ? `r2v-vid:${ref.type || "input"}:${ref.videoFile}`
-                        : `r2v-vid-poster:${ref.previewImageFile || ref.previewImageUrl}`,
-                    kind: ref.videoFile ? "video" : "poster",
-                    path: ref.videoFile || ref.previewImageFile || ref.previewImageUrl,
-                    type: ref.type || "input",
-                    directUrl: ref.previewImageUrl || "",
-                })),
-            ].slice(0, 4);
-            if (!media.length && previewB64) {
-                media.push({ key: `r2v-prev:${seg.id || startX}`, kind: "preview", path: previewB64 });
+            const vidRef = [...(seg.refVideos || [])]
+                .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
+                .find((r) => r?.videoFile || r?.previewImageFile || r?.previewImageUrl || r?.linked);
+            const vidPath = vidRef?.videoFile || "";
+            const vidType = vidRef?.type || "input";
+            const posterFile = vidRef?.previewImageFile || "";
+            const posterUrl = vidRef?.previewImageUrl || "";
+            let cacheKey = "";
+            let srcKind = "";
+            if (imgFile) {
+                cacheKey = `r2v:${imgFile}`;
+                srcKind = "image";
+            } else if (previewB64) {
+                cacheKey = `r2v-prev:${seg.id || startX}`;
+                srcKind = "preview";
+            } else if (vidPath) {
+                cacheKey = `r2v-vid:${vidType}:${vidPath}`;
+                srcKind = "video";
+            } else if (posterFile || posterUrl) {
+                cacheKey = `r2v-vid-poster:${posterFile || posterUrl}`;
+                srcKind = "poster";
             }
-            const drawCached = (img, x, y, w, cellH) => {
+            const drawCached = (img) => {
                 if (!img?.naturalWidth && !img?.width) return false;
                 const natW = img.naturalWidth || img.width;
                 const natH = Math.max(1, img.naturalHeight || img.height);
                 const ratio = natW / natH;
-                let dw = w - 4;
+                let dw = pxWidth - 4;
                 let dh = dw / ratio;
-                if (dh > cellH - 4) {
-                    dh = cellH - 4;
+                if (dh > h - 4) {
+                    dh = h - 4;
                     dw = dh * ratio;
                 }
-                ctx.drawImage(img, x + (w - dw) / 2, y + (cellH - dh) / 2, dw, dh);
+                ctx.drawImage(img, startX + (pxWidth - dw) / 2, y0 + (h - dh) / 2, dw, dh);
                 return true;
             };
-            if (media.length) {
-                const cols = media.length === 1 ? 1 : 2;
-                const rows = Math.ceil(media.length / cols);
-                const cellW = pxWidth / cols;
-                const cellH = h / rows;
-                media.forEach((item, mediaIndex) => {
-                    const cellX = startX + (mediaIndex % cols) * cellW;
-                    const cellY = y0 + Math.floor(mediaIndex / cols) * cellH;
-                    const img = this._thumbCache.get(item.key);
-                    if (drawCached(img, cellX, cellY, cellW, cellH)) return;
-                    if (item.kind === "video") {
-                        this._queueR2vVideoThumb(item.key, item.path, item.type);
-                    } else if (!this._thumbPending.has(item.key)) {
-                        this._thumbPending.add(item.key);
+            if (cacheKey) {
+                const img = this._thumbCache.get(cacheKey);
+                if (!drawCached(img)) {
+                    if (srcKind === "video") {
+                        this._queueR2vVideoThumb(cacheKey, vidPath, vidType);
+                    } else if (!this._thumbPending.has(cacheKey)) {
+                        this._thumbPending.add(cacheKey);
                         const el = new Image();
                         el.crossOrigin = "anonymous";
                         el.onload = () => {
-                            this._thumbCache.set(item.key, el);
-                            this._thumbPending.delete(item.key);
+                            this._thumbCache.set(cacheKey, el);
+                            this._thumbPending.delete(cacheKey);
                             this.scheduleRender();
                         };
-                        el.onerror = () => this._thumbPending.delete(item.key);
-                        if (item.kind === "image") el.src = refViewUrl(item.path);
-                        else if (item.kind === "poster") {
-                            el.src = item.directUrl || refViewUrl(item.path);
+                        el.onerror = () => this._thumbPending.delete(cacheKey);
+                        if (srcKind === "image") el.src = refViewUrl(imgFile);
+                        else if (srcKind === "poster") {
+                            el.src = posterUrl || refViewUrl(posterFile);
                         } else {
-                            el.src = String(item.path).startsWith("data:")
-                                ? item.path
-                                : `data:image/png;base64,${item.path}`;
+                            el.src = String(previewB64).startsWith("data:")
+                                ? previewB64
+                                : `data:image/png;base64,${previewB64}`;
                         }
                     }
-                });
+                }
             } else {
                 ctx.fillStyle = "#666";
                 ctx.font = "12px sans-serif";

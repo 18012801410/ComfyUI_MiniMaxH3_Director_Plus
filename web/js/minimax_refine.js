@@ -395,7 +395,6 @@ function ensureFirstPassCacheUI(node) {
         "border-radius:6px",
         "background:rgba(0,0,0,.16)",
         "font:12px/1.45 sans-serif",
-        "user-select:text",
     ].join(";");
     const header = document.createElement("div");
     header.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:5px";
@@ -403,44 +402,17 @@ function ensureFirstPassCacheUI(node) {
     title.textContent = "一采缓存状态";
     const refresh = document.createElement("button");
     refresh.type = "button";
-    refresh.textContent = "刷新";
+    refresh.textContent = "重新检查";
     refresh.style.cssText = "padding:2px 8px;cursor:pointer";
     refresh.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         refreshFirstPassCacheStatus(node);
     });
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.textContent = "复制";
-    copy.style.cssText = "padding:2px 8px;cursor:pointer";
     const body = document.createElement("div");
-    body.style.cssText = "white-space:pre-wrap;word-break:break-word;user-select:text;cursor:text";
+    body.style.cssText = "white-space:pre-wrap;word-break:break-word";
     body.textContent = "等待检查…";
-    for (const eventName of ["pointerdown", "mousedown", "click"]) {
-        body.addEventListener(eventName, (event) => event.stopPropagation());
-    }
-    copy.addEventListener("click", async (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const value = body.textContent || "";
-        try {
-            await navigator.clipboard.writeText(value);
-            copy.textContent = "已复制";
-        } catch {
-            const range = document.createRange();
-            range.selectNodeContents(body);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            copy.textContent = "已选中";
-        }
-        setTimeout(() => { copy.textContent = "复制"; }, 1200);
-    });
-    const actions = document.createElement("div");
-    actions.style.cssText = "display:flex;gap:5px";
-    actions.append(copy, refresh);
-    header.append(title, actions);
+    header.append(title, refresh);
     root.append(header, body);
     const widget = node.addDOMWidget(CACHE_STATUS_WIDGET, "cache_status", root, {
         getValue: () => "",
@@ -452,9 +424,8 @@ function ensureFirstPassCacheUI(node) {
     widget.serialize = false;
     if (!widget.options) widget.options = {};
     widget.options.serialize = false;
-    node._mmxFirstPassCacheUI = { root, body, copy, refresh, widget };
+    node._mmxFirstPassCacheUI = { root, body, refresh, widget };
 }
-
 function syncRefineWidgetVisibility(node) {
     const mode = readMode(node);
     const upscale = mode === "upscale";

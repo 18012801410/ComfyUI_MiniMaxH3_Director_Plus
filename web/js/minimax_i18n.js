@@ -332,7 +332,7 @@ const ZH = {
     "smartSplit.failed": "智能分割失败：{err}",
 
     "canvas.uploadPicture1": "选择/上传图片1",
-    "canvas.uploadR2vMedia": "点击空素材组上传参考图/视频",
+    "canvas.uploadR2vMedia": "选择/上传参考图/视频",
     "canvas.blankCanvas": "空白画布",
     "canvas.uploadSourceImage": "点击选择/上传源图片",
     "canvas.clickAddShot": "点击「添加一组」",
@@ -763,7 +763,7 @@ const EN = {
     "smartSplit.failed": "Smart split failed: {err}",
 
     "canvas.uploadPicture1": "Choose/Upload Picture 1",
-    "canvas.uploadR2vMedia": "Click an empty group to upload reference media",
+    "canvas.uploadR2vMedia": "Choose/Upload ref image / video",
     "canvas.blankCanvas": "Blank canvas",
     "canvas.uploadSourceImage": "Click to choose/upload source image",
     "canvas.clickAddShot": "Click \"Add shot\"",
