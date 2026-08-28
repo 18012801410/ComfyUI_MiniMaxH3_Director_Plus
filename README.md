@@ -80,7 +80,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 - **Hugging Face：** [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
 - **ComfyUI 文档：** [MiniMax H3 工作流示例](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3)
 
-本仓库自带示例：`example_workflows/`
+本仓库自带示例：`example_workflows/`；**Plus 刷新版**（全部升级到当前节点 v5 字段 + 新能力说明）见 `example_workflows_plus/`，接线与原版一致。
 
 | 工作流 | task_type | UNET | 说明 |
 |--------|-----------|------|------|
