@@ -31,9 +31,11 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MiniMaxH3Director": "MiniMaxH3Director",
-    "MiniMaxH3DirectorRefine": "MiniMax H3 Director Refine",
-    "ComfyMiniMaxH3Director": "MiniMaxH3Director",
+    # Display names carry a「Plus」marker so the fork is visible in Add Node /
+    # node titles; class ids stay upstream-identical for workflow compat.
+    "MiniMaxH3Director": "MiniMaxH3Director Plus",
+    "MiniMaxH3DirectorRefine": "MiniMax H3 Director Refine Plus",
+    "ComfyMiniMaxH3Director": "MiniMaxH3Director Plus",
     "MiniMaxH3DirectorConditioning": "MiniMax H3 Director Conditioning",
     "MiniMaxH3DirectorPlannerConditioning": "MiniMax H3 Director Planner Conditioning",
     "MiniMaxH3DirectorGroupImageToVideo": "MiniMax H3 Director Group (Image to Video)",
