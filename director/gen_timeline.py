@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import torch
 
@@ -14,6 +15,7 @@ from ..lib.image_prep import (
     resolve_output_dimensions,
 )
 from ..lib.task_prompts import resolve_task_key
+from .frame_align import minimax_align_frame_count
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.gen")
 
@@ -24,6 +26,10 @@ GEN_TASK_KEYS = GEN_BLANK_KEYS | GEN_IMAGE_KEYS | FL2V_KEYS
 PROMPT_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v", "fl2v"})
 VIDEO_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v", "fl2v"})
 IMAGE_BATCH_KEYS = frozenset()
+
+# Tasks that support「自动续拍」：target-duration driven segment expansion.
+# fl2v 首尾帧钉死语义与自动展开冲突；v2v/rv2v 依赖源视频区间，均不开放。
+AUTO_CONTINUE_TASK_KEYS = frozenset({"t2v", "i2v", "r2v"})
 
 MIN_GEN_FRAMES = 1
 MIN_GEN_VIDEO_FRAMES = 4
@@ -75,6 +81,160 @@ def _min_frames_for_task(task_key: str) -> int:
     if task_key in ("t2v", "i2v", "r2v"):
         return MIN_GEN_VIDEO_FRAMES
     return MIN_GEN_VIDEO_FRAMES
+
+
+def _auto_continue_block(timeline: dict) -> dict:
+    block = timeline.get("autoContinue") or timeline.get("auto_continue") or {}
+    return block if isinstance(block, dict) else {}
+
+
+def _truthy_flag(value) -> bool:
+    if value is True or value == 1:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return False
+
+
+def auto_continue_enabled(timeline: dict) -> bool:
+    return _truthy_flag(_auto_continue_block(timeline).get("enabled"))
+
+
+def _split_prompt_seed(line: str) -> tuple[str, int | None]:
+    """「提示词 | seed」行格式（TASK-004）；无 '|' 或 seed 非数字 → 整行作提示词。"""
+    text = line.strip()
+    if "|" in text:
+        head, _, tail = text.rpartition("|")
+        tail = tail.strip()
+        if tail.isdigit():
+            return head.strip(), int(tail)
+    return text, None
+
+
+def auto_continue_shape(
+    timeline: dict,
+    *,
+    default_frame_count: int,
+    frame_rate: float,
+) -> dict | None:
+    """Validate「自动续拍」config and compute the segment layout.
+
+    Returns ``None`` when disabled; raises ``ValueError`` on invalid config so the
+    failure surfaces at the earliest position. All segment lengths sit on the
+    MiniMax 17k+5 grid; the last segment rounds the remainder **up**, so the
+    actual output may exceed the target by up to one grid step.
+    """
+    block = _auto_continue_block(timeline)
+    if not _truthy_flag(block.get("enabled")):
+        return None
+
+    fps = max(1.0, float(frame_rate or 24))
+    target_seconds = float(block.get("targetSeconds") or block.get("target_seconds") or 0)
+    if target_seconds <= 0:
+        raise ValueError(
+            "自动续拍已开启但目标时长无效：请填写大于 0 的「目标时长(秒)」。"
+        )
+    target_frames = max(1, int(round(target_seconds * fps)))
+
+    per = minimax_align_frame_count(int(default_frame_count or 124))
+    if target_frames <= per:
+        count, last = 1, per
+    else:
+        count = int(math.ceil(target_frames / per))
+        last = minimax_align_frame_count(target_frames - (count - 1) * per)
+
+    prompt_entries = [
+        _split_prompt_seed(str(p))
+        for p in (block.get("prompts") or [])
+        if str(p).strip()
+    ]
+    raw_mode = str(block.get("promptMode") or "").strip().lower()
+    if raw_mode in ("prompts", "list", "prompts_list"):
+        prompt_mode = "prompts"
+    elif raw_mode in ("reuse", "global", ""):
+        prompt_mode = "reuse"
+    else:
+        prompt_mode = "reuse"
+    if raw_mode in ("prompts", "list", "prompts_list") and not prompt_entries:
+        raise ValueError(
+            "自动续拍选择了「提示词列表循环」，但列表为空：请至少填写一行续拍提示词，"
+            "或改用「复用全局提示词」。"
+        )
+
+    return {
+        "target_seconds": target_seconds,
+        "target_frames": target_frames,
+        "per_frames": per,
+        "count": count,
+        "last_frames": last,
+        "prompt_mode": prompt_mode,
+        "prompt_entries": prompt_entries,
+    }
+
+
+def apply_auto_continue(
+    timeline: dict,
+    *,
+    task_key: str,
+    global_block: dict,
+    shape: dict,
+) -> dict:
+    """Return a new timeline dict whose ``segments`` are the synthesized auto-continue runs."""
+    from .segment_continuity import resolve_continuity_settings
+
+    if shape["count"] >= 2:
+        enabled, _overlap = resolve_continuity_settings(
+            timeline, segment_count=shape["count"]
+        )
+        if not enabled:
+            raise ValueError(
+                "自动续拍要求开启「段间引导」：请在输出栏勾选「段间引导」（推荐上下文帧数 22），"
+                "否则各段之间无法衔接。"
+            )
+
+    gen_image: dict | None = None
+    if task_key == "i2v":
+        gi = global_block.get("genImage") or {}
+        if gi.get("imageFile") or gi.get("imageB64"):
+            gen_image = dict(gi)
+        elif global_block.get("imageFile"):
+            gen_image = {"imageFile": global_block["imageFile"]}
+        else:
+            raise ValueError(
+                "i2v 自动续拍需要全局首帧图片：请在全局参数上传源图片，所有续拍段将以它为起点。"
+            )
+
+    entries = shape["prompt_entries"]
+    segments: list[dict] = []
+    for i in range(shape["count"]):
+        fc = shape["per_frames"] if i < shape["count"] - 1 else shape["last_frames"]
+        seg: dict = {"frameCount": fc, "length": fc}
+        if shape["prompt_mode"] == "prompts":
+            text, seed = entries[i % len(entries)]
+            if text:
+                seg["prompt"] = text
+            if seed is not None:
+                seg["seedOverride"] = seed
+        if i > 0:
+            seg["continuityFromPrev"] = True
+        if gen_image is not None:
+            seg["genImage"] = dict(gen_image)
+        segments.append(seg)
+
+    new_timeline = dict(timeline)
+    new_timeline["segments"] = segments
+    new_timeline["autoContinueApplied"] = {
+        "taskKey": task_key,
+        "targetSeconds": shape["target_seconds"],
+        "targetFrames": shape["target_frames"],
+        "segmentCount": shape["count"],
+        "perFrames": shape["per_frames"],
+        "lastFrames": shape["last_frames"],
+        "promptMode": shape["prompt_mode"],
+        "promptCount": len(entries),
+        "seededCount": sum(1 for _t, sd in entries if sd is not None),
+    }
+    return new_timeline
 
 
 def _segment_frame_count(raw: dict, *, default: int, task_key: str) -> int:
@@ -269,6 +429,7 @@ def build_gen_director_plan(
         _resolve_export_mode,
         concat_common_segment_prompt,
         merge_indexed_refs,
+        parse_seed_override,
         resolve_ref_image_size,
         segment_ref_audios_for_context,
         segment_refs_for_context,
@@ -299,6 +460,20 @@ def build_gen_director_plan(
     output_block = timeline.get("output") or {}
     gen_block = timeline.get("gen") or {}
     default_fc = int(gen_block.get("defaultFrameCount") or total_frames or 81)
+
+    if task_key in AUTO_CONTINUE_TASK_KEYS and auto_continue_enabled(timeline):
+        shape = auto_continue_shape(
+            timeline,
+            default_frame_count=default_fc,
+            frame_rate=float(timeline.get("frameRate") or frame_rate or 24),
+        )
+        if shape is not None:
+            timeline = apply_auto_continue(
+                timeline,
+                task_key=task_key,
+                global_block=global_block,
+                shape=shape,
+            )
 
     segment_ranges = _gen_segment_ranges(
         timeline.get("segments") or [],
@@ -499,6 +674,7 @@ def build_gen_director_plan(
                     seg_data if isinstance(seg_data, dict) else {},
                     timeline,
                 ),
+                seed_override=parse_seed_override(seg_data),
             )
         )
 

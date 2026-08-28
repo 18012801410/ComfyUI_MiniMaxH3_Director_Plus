@@ -2495,6 +2495,53 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                 };
             }
             meta.appendChild(secRow);
+
+            // Per-segment seed override (重掷-锁定)：空 = 跟随节点 seed。
+            const seedRow = document.createElement("label");
+            seedRow.className = "bd-batch-fc";
+            const seedVal = Number.isFinite(Number(seg.seedOverride)) && seg.seedOverride !== ""
+                ? Number(seg.seedOverride) : "";
+            seedRow.innerHTML = `${t("batch.seed")} <input type="number" data-batch-seed-index="${index}" data-batch-seg-id="${seg.id || ""}" min="0" step="1" value="${seedVal}" placeholder="${t("batch.seedPlaceholder")}" style="width:92px" title="${t("batch.seedTooltip")}"> <button type="button" class="bd-btn" data-batch-seed-roll="${index}" title="${t("batch.seedRerollTooltip")}">🎲</button>`;
+            const seedInput = seedRow.querySelector("input");
+            const liveSeedSeg = () => {
+                const liveIdx = (editor.timeline.segments || []).findIndex((s) => s?.id && s.id === seg.id);
+                const i = liveIdx >= 0 ? liveIdx : index;
+                return editor.timeline.segments?.[i];
+            };
+            const applySeed = () => {
+                const live = liveSeedSeg();
+                if (!live) return;
+                const raw = String(seedInput.value ?? "").trim();
+                if (raw === "") {
+                    delete live.seedOverride;
+                } else {
+                    const n = Math.max(0, Math.round(Number(raw)));
+                    if (!Number.isFinite(n)) return;
+                    seedInput.value = String(n);
+                    live.seedOverride = n;
+                }
+                editor.commit?.(false, { syncTimeline: true });
+                editor.flushTimelineSync?.();
+            };
+            if (externalLocked) {
+                seedInput.readOnly = true;
+                seedInput.disabled = true;
+            } else {
+                seedInput.onchange = applySeed;
+                seedInput.onblur = applySeed;
+                seedInput.onclick = (e) => e.stopPropagation();
+                seedRow.querySelector("[data-batch-seed-roll]").onclick = (e) => {
+                    e.stopPropagation();
+                    const live = liveSeedSeg();
+                    if (!live) return;
+                    const n = Math.floor(Math.random() * 1_000_000_000);
+                    live.seedOverride = n;
+                    seedInput.value = String(n);
+                    editor.commit?.(false, { syncTimeline: true });
+                    editor.flushTimelineSync?.();
+                };
+            }
+            meta.appendChild(seedRow);
         }
         if (!externalLocked) {
             const del = document.createElement("button");

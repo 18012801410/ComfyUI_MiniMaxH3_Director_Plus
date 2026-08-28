@@ -44,6 +44,7 @@ from .plan import (
     reinforce_r2v_prompt,
     reinforce_rv2v_prompt,
     reinforce_v2v_prompt,
+    segment_seed,
 )
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .h3_motion_context import (
@@ -834,7 +835,7 @@ def execute_director_plan_core(
                 sample_len = cached_sample
             reports.append(
                 f"Segment {ui_idx + 1}/{timeline_seg_total}: 命中一采缓存 "
-                f"(seed={int(getattr(plan, 'sample_seed', seed) or seed)})，跳过一采，开始二采"
+                f"(seed={segment_seed(seg, plan)})，跳过一采，开始二采"
             )
         else:
             samples = sample_single_stage(
@@ -842,7 +843,7 @@ def execute_director_plan_core(
                 positive=positive,
                 negative=negative,
                 latent=latent,
-                seed=seed,
+                seed=segment_seed(seg, plan),
                 cfg=cfg,
                 steps=steps,
                 sampler_name=sampler,

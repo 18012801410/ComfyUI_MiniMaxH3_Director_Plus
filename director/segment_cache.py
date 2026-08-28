@@ -19,7 +19,7 @@ import torch
 import folder_paths
 
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
-from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
+from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size, segment_seed
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
@@ -139,7 +139,7 @@ def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[s
     fp = _segment_identity_fingerprint(seg, plan)
     fp.update({
         "kind": "first_pass",
-        "seed": int(getattr(plan, "sample_seed", 0) or 0),
+        "seed": segment_seed(seg, plan),
         "cfg": round(float(getattr(plan, "sample_cfg", 1.0) or 1.0), 6),
         "steps": int(getattr(plan, "sample_steps", 25) or 25),
         "sampler": str(getattr(plan, "sample_sampler", "") or ""),

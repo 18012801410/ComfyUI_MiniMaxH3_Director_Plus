@@ -30,6 +30,9 @@ from ..lib.video_io import (
     video_clips_from_timeline,
 )
 from .gen_timeline import (
+    AUTO_CONTINUE_TASK_KEYS,
+    auto_continue_enabled,
+    auto_continue_shape,
     build_gen_director_plan,
     is_gen_timeline,
 )
@@ -155,6 +158,8 @@ class SegmentPlan:
     continuity_from_prev: bool = True
     # Official MiniMaxH3ReferenceToVideo combo: match | max. Per r2v/rv2v group.
     ref_image_size: str = "match"
+    # Per-segment seed override (TASK-002 重掷-锁定)；None = 跟随节点级 seed。
+    seed_override: int | None = None
 
     @property
     def frame_count(self) -> int:
@@ -164,6 +169,27 @@ class SegmentPlan:
     def timeline_index(self) -> int:
         """Index used for UI preview / highlight (timeline card)."""
         return int(self.index if self.ui_index is None else self.ui_index)
+
+
+def parse_seed_override(seg_data: dict | None) -> int | None:
+    """Per-segment seed override from timeline JSON; absent/invalid → None (node seed)."""
+    if not isinstance(seg_data, dict):
+        return None
+    raw = seg_data.get("seedOverride")
+    if raw is None:
+        raw = seg_data.get("seed_override")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def segment_seed(seg: SegmentPlan, plan: DirectorPlan) -> int:
+    """Per-segment effective sampling seed: override wins over plan-level node seed."""
+    override = getattr(seg, "seed_override", None)
+    return int(override) if override is not None else int(getattr(plan, "sample_seed", 0) or 0)
 
 
 @dataclass
@@ -529,6 +555,18 @@ def count_all_timeline_segments(timeline_data: str) -> int:
 
         return count_fl2v_runnable_shots(timeline)
     if is_gen_timeline(timeline, task_key):
+        if task_key in AUTO_CONTINUE_TASK_KEYS and auto_continue_enabled(timeline):
+            # 展开后的段数（无效配置在此抛错，早于计划构建失败）。
+            shape = auto_continue_shape(
+                timeline,
+                default_frame_count=int(
+                    (timeline.get("gen") or {}).get("defaultFrameCount")
+                    or timeline.get("totalFrames")
+                    or 124
+                ),
+                frame_rate=float(timeline.get("frameRate") or 24),
+            )
+            return max(1, shape["count"])
         return max(1, len(segments) or 1)
 
     source_total = logical_frame_count(timeline) or int(timeline.get("totalFrames") or 0)
@@ -699,6 +737,7 @@ def build_director_plan(
                 ref_audios=seg_ref_audios,
                 reference_video_meta=seg_ref_video,
                 reference_video_start_frame=ref_start,
+                seed_override=parse_seed_override(seg_data),
             )
         )
 
@@ -865,6 +904,21 @@ def plan_summary(plan: DirectorPlan) -> str:
             refine_line = None
         if refine_line:
             lines.append(refine_line)
+        try:
+            from .segment_continuity import tone_continuity_enabled
+
+            if tone_continuity_enabled(plan):
+                lines.append("Tone continuity: ON (additive bias at joints)")
+        except ImportError:
+            pass
+        auto = plan.raw.get("autoContinueApplied") if isinstance(plan.raw, dict) else None
+        if isinstance(auto, dict):
+            lines.append(
+                f"Auto continue: target {auto.get('targetSeconds')}s → "
+                f"{auto.get('segmentCount')} segment(s) @ {auto.get('perFrames')}f/seg "
+                f"(last {auto.get('lastFrames')}f), prompt mode {auto.get('promptMode')} "
+                f"({auto.get('promptCount')} prompt(s), {auto.get('seededCount') or 0} seeded)"
+            )
         if plan.continuity_enabled:
             pinned = [
                 seg.index + 1
@@ -894,6 +948,8 @@ def plan_summary(plan: DirectorPlan) -> str:
                     if getattr(seg, "continuity_from_prev", True)
                     else " — hard cut"
                 )
+            if getattr(seg, "seed_override", None) is not None:
+                pin_note += f" — seed:{seg.seed_override}"
             lines.append(
                 f"  #{seg.index + 1} [{seg.start_frame}:{seg.end_frame}] "
                 f"{seg.frame_count}f — {seg.task_key}{pin_note} — "
@@ -967,6 +1023,13 @@ def plan_summary(plan: DirectorPlan) -> str:
             f"Run selection: {len(selected)}/{plan.segment_count} segment(s) "
             f"(#{', #'.join(str(i + 1) for i in selected)}; skipped #{', #'.join(map(str, skipped)) or 'none'})"
         )
+    try:
+        from .segment_continuity import tone_continuity_enabled
+
+        if tone_continuity_enabled(plan):
+            lines.append("Tone continuity: ON (additive bias at joints)")
+    except ImportError:
+        pass
     lines.append(f"Global task: {get_task_prompt_spec(plan.global_task_type).label}")
     for seg in plan.segments:
         pin_note = ""
@@ -976,6 +1039,8 @@ def plan_summary(plan: DirectorPlan) -> str:
                 if getattr(seg, "continuity_from_prev", True)
                 else " — hard cut"
             )
+        if getattr(seg, "seed_override", None) is not None:
+            pin_note += f" — seed:{seg.seed_override}"
         lines.append(
             f"  #{seg.index + 1} [{seg.start_frame}:{seg.end_frame}] "
             f"{seg.frame_count}f — {seg.task_key}{pin_note} — "

@@ -2220,6 +2220,9 @@ class MiniMaxH3DirectorEditor {
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                         refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
+                        seedOverride: Number.isFinite(Number(clean.seedOverride)) && clean.seedOverride !== ""
+                            ? Math.max(0, Math.round(Number(clean.seedOverride)))
+                            : undefined,
                     };
                 }),
                 ...this._runSelectionPayload(),
@@ -2515,10 +2518,33 @@ class MiniMaxH3DirectorEditor {
                     <option value="39">39</option>
                     <option value="56">56</option>
                 </select>
+                <label><input type="checkbox" data-r="tone-continuity-cb"><span data-i18n="output.toneContinuity">色调延续</span></label>
+            </span>
+            <span class="bd-continuous-ref hidden" data-r="auto-continue-wrap" hidden aria-hidden="true">
+                <label><input type="checkbox" data-r="auto-continue-cb"><span data-i18n="output.autoContinue">自动续拍</span></label>
+                <span class="bd-meta" data-i18n="output.autoContinueTarget">目标时长(秒)</span>
+                <input type="number" class="bd-num" data-r="auto-continue-target" min="5" max="7200" step="1" value="60" style="width:64px">
+                <select class="bd-select" data-r="auto-continue-mode" style="max-width:130px">
+                    <option value="reuse" data-i18n="output.autoContinueReuse">复用全局提示词</option>
+                    <option value="prompts" data-i18n="output.autoContinuePromptsMode">提示词列表循环</option>
+                </select>
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview active" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
         this.outputBarEl = outputBar;
+
+        const autoContinuePanel = document.createElement("div");
+        autoContinuePanel.className = "bd-live-sample hidden";
+        autoContinuePanel.setAttribute("data-r", "auto-continue-panel");
+        autoContinuePanel.innerHTML = `
+            <div class="bd-live-sample-head">
+                <b data-i18n="output.autoContinuePromptsTitle">续拍提示词列表</b>
+                <span class="bd-meta" data-i18n="output.autoContinuePromptsHint">每行一条，按段序循环（第 1 条→第 2 段……，用尽后从头循环）。执行时按目标时长自动展开为多段并逐段衔接，现有片段卡片不再参与。</span>
+            </div>
+            <textarea data-r="auto-continue-prompts" rows="4" style="width:100%;box-sizing:border-box;background:#1a1d24;color:#dfe3ea;border:1px solid #343a46;border-radius:6px;padding:6px 8px;font:12px/1.5 monospace;resize:vertical"></textarea>`;
+        this.mainBody.appendChild(autoContinuePanel);
+        this.autoContinuePanel = autoContinuePanel;
+        this.autoContinuePromptsEl = autoContinuePanel.querySelector('[data-r="auto-continue-prompts"]');
 
         const liveSample = document.createElement("div");
         liveSample.className = "bd-live-sample hidden";
@@ -2818,6 +2844,11 @@ class MiniMaxH3DirectorEditor {
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
+        this.autoContinueWrap = this.root.querySelector('[data-r="auto-continue-wrap"]');
+        this.autoContinueCb = this.root.querySelector('[data-r="auto-continue-cb"]');
+        this.autoContinueTarget = this.root.querySelector('[data-r="auto-continue-target"]');
+        this.autoContinueMode = this.root.querySelector('[data-r="auto-continue-mode"]');
+        this.toneContinuityCb = this.root.querySelector('[data-r="tone-continuity-cb"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -3104,6 +3135,51 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.oninput = applyOverlap;
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.autoContinueCb) {
+            this.autoContinueCb.onchange = () => this.setAutoContinueEnabled(this.autoContinueCb.checked);
+        }
+        if (this.toneContinuityCb) {
+            this.toneContinuityCb.onchange = () => {
+                if (this.timeline?.output) {
+                    this.timeline.output.toneContinuity = !!this.toneContinuityCb.checked;
+                }
+                this.commit();
+                this.flushTimelineSync();
+            };
+        }
+        if (this.autoContinueTarget) {
+            const applyAutoTarget = () => {
+                const block = this.timeline?.autoContinue;
+                if (!block) return;
+                const n = Math.max(5, Math.round(Number(this.autoContinueTarget.value) || 0));
+                this.autoContinueTarget.value = String(n);
+                block.targetSeconds = n;
+                this.commit();
+                this.flushTimelineSync();
+            };
+            this.autoContinueTarget.onchange = applyAutoTarget;
+            this.autoContinueTarget.addEventListener("keydown", (e) => e.stopPropagation());
+            this.autoContinueTarget.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.autoContinueMode) {
+            this.autoContinueMode.onchange = () => {
+                const block = this.timeline?.autoContinue;
+                if (!block) return;
+                block.promptMode = this.autoContinueMode.value === "prompts" ? "prompts" : "reuse";
+                this.updateAutoContinueUI();
+                this.commit();
+                this.flushTimelineSync();
+            };
+        }
+        if (this.autoContinuePromptsEl) {
+            this.autoContinuePromptsEl.onchange = () => {
+                const block = this.timeline?.autoContinue;
+                if (!block) return;
+                block.prompts = this.autoContinuePromptsEl.value.split("\n").map((s) => s.trim()).filter(Boolean);
+                this.commit();
+                this.flushTimelineSync();
+            };
         }
         if (this.segContinuityFromPrevCb) {
             this.segContinuityFromPrevCb.onchange = () => {
@@ -5664,8 +5740,72 @@ class MiniMaxH3DirectorEditor {
             // Keep DOM aligned with timeline; eligibility only gates visibility.
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
+        if (this.toneContinuityCb && this.timeline?.output) {
+            this.toneContinuityCb.checked = !!this.timeline.output.toneContinuity;
+        }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
+        this.updateAutoContinueUI();
+    }
+
+    /** 自动续拍 applies to gen batch tasks only; expansion happens backend-side. */
+    autoContinueEligible() {
+        return ["t2v", "i2v", "r2v"].includes(this.getTaskKey());
+    }
+
+    isAutoContinueEnabled() {
+        const block = this.timeline?.autoContinue;
+        if (!block) return false;
+        const raw = block.enabled;
+        return raw === true || raw === 1 || raw === "true" || raw === "1";
+    }
+
+    setAutoContinueEnabled(on) {
+        const tl = this.timeline;
+        if (!tl) return;
+        if (on) {
+            const target = Math.max(5, Math.round(Number(this.autoContinueTarget?.value) || 60));
+            if (this.autoContinueTarget) this.autoContinueTarget.value = String(target);
+            const mode = this.autoContinueMode?.value === "prompts" ? "prompts" : "reuse";
+            const prompts = (this.autoContinuePromptsEl?.value || "")
+                .split("\n").map((s) => s.trim()).filter(Boolean);
+            tl.autoContinue = { enabled: true, targetSeconds: target, promptMode: mode, prompts };
+            // 后端要求段间引导开启 — 替用户直接勾上。
+            if (!isContinuityEnabled(tl.output)) this.onOutputField("continuityEnabled", true);
+        } else if (tl.autoContinue) {
+            tl.autoContinue.enabled = false;
+        }
+        this.updateAutoContinueUI();
+        this.commit();
+        this.flushTimelineSync();
+    }
+
+    updateAutoContinueUI() {
+        const show = this.autoContinueEligible();
+        if (this.autoContinueWrap) {
+            this.autoContinueWrap.classList.toggle("hidden", !show);
+            this.autoContinueWrap.hidden = !show;
+            this.autoContinueWrap.setAttribute("aria-hidden", show ? "false" : "true");
+        }
+        if (!show) {
+            this.autoContinuePanel?.classList.add("hidden");
+            return;
+        }
+        const block = this.timeline?.autoContinue || {};
+        const on = this.isAutoContinueEnabled();
+        if (this.autoContinueCb) this.autoContinueCb.checked = on;
+        if (this.autoContinueTarget && Number.isFinite(Number(block.targetSeconds))) {
+            this.autoContinueTarget.value = String(block.targetSeconds);
+        }
+        if (this.autoContinueMode) {
+            this.autoContinueMode.value = block.promptMode === "prompts" ? "prompts" : "reuse";
+        }
+        if (this.autoContinuePromptsEl
+            && Array.isArray(block.prompts)
+            && document.activeElement !== this.autoContinuePromptsEl) {
+            this.autoContinuePromptsEl.value = block.prompts.join("\n");
+        }
+        this.autoContinuePanel?.classList.toggle("hidden", !(on && block.promptMode === "prompts"));
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */

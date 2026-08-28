@@ -76,6 +76,12 @@ CONTINUITY_OPENING_LUMA_MAX_RATIO = 1.8
 CONTINUITY_OPENING_LUMA_EPSILON = 0.015
 # Concat: additive luma ONLY — body0/hold→pop RGB caused 拖影+一顿一顿 (00035).
 CONTINUITY_SEAM_ADD_LUMA_FRAMES = 12
+
+# 「色调延续」(opt-in, TASK-003)：接缝两侧均值差的加法 bias，只减漂移不做风格迁移。
+# 乘法 gain 在本仓库历史上造成亮度泵（见 _match_opening_luma_to_guide 注释），禁用。
+TONE_CONTINUITY_MAX_BIAS = 0.08   # ≈ ±20/255
+TONE_CONTINUITY_MIN_BIAS = 0.004  # 低于此视为无漂移，不处理
+TONE_MATCH_WINDOW = 12            # 接缝两侧各取的帧数
 CONTINUITY_SEAM_ADD_LUMA_MAX = 0.10
 CONTINUITY_BODY0_SEAM_WEIGHT = 0.0
 CONTINUITY_BODY1_SEAM_WEIGHT = 0.0
@@ -1536,6 +1542,47 @@ def continuity_merged_frame_count(plan: DirectorPlan) -> int:
     return int(plan.total_frames)
 
 
+def _truthy_output_flag(value) -> bool:
+    if value is True or value == 1:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return False
+
+
+def tone_continuity_enabled(plan) -> bool:
+    """「色调延续」开关：timeline output.toneContinuity，默认关闭。"""
+    out = (getattr(plan, "raw", None) or {}).get("output") or {}
+    return _truthy_output_flag(
+        out.get("toneContinuity", out.get("tone_continuity"))
+    )
+
+
+def _apply_tone_continuity(
+    body: torch.Tensor,
+    left: torch.Tensor,
+    plan: DirectorPlan,
+) -> torch.Tensor:
+    """Additive per-channel bias pulling the next chunk toward prev tail mean.
+
+    Whole-body correction: H3 chained segments drift cumulatively darker/shifted;
+    the drift is a bias phenomenon, not a gain one. Clamped and opt-in.
+    """
+    n = min(TONE_MATCH_WINDOW, int(left.shape[0]), int(body.shape[0]))
+    if n <= 0:
+        return body
+    prev_mean = left[-n:].reshape(-1, int(body.shape[-1])).mean(dim=0)
+    next_mean = body[:n].reshape(-1, int(body.shape[-1])).mean(dim=0)
+    bias = (prev_mean - next_mean).clamp(-TONE_CONTINUITY_MAX_BIAS, TONE_CONTINUITY_MAX_BIAS)
+    if float(bias.abs().max()) < TONE_CONTINUITY_MIN_BIAS:
+        return body
+    log.info(
+        "Tone continuity: joint RGB bias %s",
+        ", ".join(f"{float(v):+.4f}" for v in bias.tolist()),
+    )
+    return (body + bias).clamp(0.0, 1.0)
+
+
 def concat_continuous_chunks(
     chunks: list[torch.Tensor],
     segments: list[SegmentPlan],
@@ -1560,6 +1607,8 @@ def concat_continuous_chunks(
         if float(CONTINUITY_SPIKE_WEIGHT) > 0:
             body = _ease_opening_spikes(body)
         body = _soften_body0_toward_prev(body, left)
+        if tone_continuity_enabled(plan):
+            body = _apply_tone_continuity(body, left, plan)
         body = _additive_opening_luma(body, left)
         left, body = _micro_seam_bridge(left, body)
         fixed[-1] = left

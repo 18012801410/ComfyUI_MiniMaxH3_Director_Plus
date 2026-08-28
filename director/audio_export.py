@@ -20,6 +20,24 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.audio_export")
 
 SILENT_SAMPLE_RATE = 44100
 
+# 接缝 declick：多段硬切拼接处的短渐变窗（对齐 Herrgott Suite 的 15ms）。
+AUDIO_JOIN_FADE_MS = 15
+
+
+def _declick_part(wave: torch.Tensor, *, fade_in: bool, fade_out: bool, sample_rate: int) -> torch.Tensor:
+    """Short linear fades at a merged-audio part's edges so hard-cut joins don't click."""
+    n = int(wave.shape[-1])
+    fade = min(max(1, int(sample_rate * AUDIO_JOIN_FADE_MS / 1000)), n)
+    if fade <= 1 or not (fade_in or fade_out):
+        return wave
+    out = wave.clone()
+    ramp = torch.linspace(0.0, 1.0, fade, dtype=out.dtype, device=out.device)
+    if fade_in:
+        out[..., :fade] = out[..., :fade] * ramp
+    if fade_out:
+        out[..., -fade:] = out[..., -fade:] * ramp.flip(-1)
+    return out
+
 AUDIO_MODE_GENERATE = "generate"
 AUDIO_MODE_SOURCE = "source"
 AUDIO_MODE_MUTE = "mute"
@@ -273,6 +291,16 @@ def _merge_generated_segment_audios(
     if not parts:
         return empty_audio_dict(sr)
     parts = [_align_audio_channels(p, max_ch) for p in parts]
+    if len(parts) > 1:
+        parts = [
+            _declick_part(
+                p,
+                fade_in=i > 0,
+                fade_out=i < len(parts) - 1,
+                sample_rate=sr,
+            )
+            for i, p in enumerate(parts)
+        ]
     merged = torch.cat(parts, dim=-1)
     return _pad_or_trim_audio_to_frames(
         {"waveform": merged, "sample_rate": sr},
