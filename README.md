@@ -92,6 +92,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group×2 → Combine → `i2v_groups` |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group×N → Combine → `r2v_groups` |
 | `minimax_h3_director_二采_加速.json` | r2v | **ref2va** | 外接 Refine 二采（SIGMAS + H3 latent）；`images` 与 `images_pre_refine` 各出一路成片 |
+| `minimax_h3_director_自动续拍.json` | t2v | fl2va | **自动续拍 30s**：目标时长自动展开多段衔接，提示词行级 seed 锁定 |
 
 ### 推荐模型文件
 
@@ -138,6 +139,18 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 1. 选 **v2v** 或 **rv2v**，上传源视频并分段（切分 / 均分 / 智能分割）
 2. 每段写提示词；系统自动将源片段绑定为 `<Video 1>`
 3. `rv2v` 可额外上传参考图 / 参考音频；声音模式可选生成 / 原声 / 静音
+
+### 自动续拍用法摘要（长视频）
+
+1. 选 **t2v / i2v / r2v**，输出栏勾选「自动续拍」，填**目标时长（秒）**，选提示词模式：
+   **复用全局提示词**，或 **提示词列表循环**（每行一段的提示词，按段序循环）
+2. 提示词行可写 **`提示词 | seed`** 锁定该段 seed；满意段保留 seed（重跑命中缓存复现），
+   不满意段删掉 seed 或换数字——只有该段重新采样
+3. 「段间引导」为硬性要求，勾选自动续拍时会自动帮你打开（推荐上下文 22 帧）；
+   长链变暗/偏色明显时再开「色调延续」
+4. Queue 后按目标时长自动展开为多段（每段约 5s，末段向上对齐 17k+5 网格）；
+   中断后重新 Queue 未变动段直接断点续跑
+5. 示例：`example_workflows/minimax_h3_director_自动续拍.json`（30s / 6 段）
 
 ### 二采 / 放大 Refine 用法摘要
 
